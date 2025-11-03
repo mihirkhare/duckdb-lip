@@ -5,6 +5,8 @@
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
+#include "duckdb/execution/operator/join/physical_hash_join.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/operator/set/physical_recursive_cte.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -12,6 +14,9 @@
 #include "duckdb/parallel/pipeline_event.hpp"
 #include "duckdb/parallel/pipeline_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+
+#include <iostream>
 
 namespace duckdb {
 
@@ -243,6 +248,101 @@ void Pipeline::Ready() {
 	}
 	ready = true;
 	std::reverse(operators.begin(), operators.end());
+
+	/* LIP *******************************************************************/
+	//
+	// std::cout << "\n\nPipeline:\n" << ToString() << '\n';
+	// std::cout << "Does this pipeline run LIP?\n";
+
+	// Probe pipelines have a source
+	if (!source) {
+		return;
+	}
+
+	// TODO: on failing return, go and clear all the bloom filters
+
+	// Validate that everything in the pipeline is a hash join allowing LIP
+	for (auto &op : operators) {
+		switch (op.get().type) {
+		case PhysicalOperatorType::HASH_JOIN: {
+			// TODO: can we do LIP but ignore joins that don't support it?
+			if (!op.get().Cast<PhysicalHashJoin>().join_supports_lip) {
+				return;
+			}
+			break;
+		}
+		case PhysicalOperatorType::PROJECTION:
+		case PhysicalOperatorType::EXPLAIN:
+		case PhysicalOperatorType::EXPLAIN_ANALYZE:
+		case PhysicalOperatorType::STREAMING_LIMIT:
+		case PhysicalOperatorType::FILTER: {
+			break;
+		}
+		default: {
+			// TODO: are other operators ok as well?
+			return;
+		}
+		}
+	}
+
+	// Map "index at join to probe" -> "real index at source"
+	unordered_map<idx_t, idx_t> bf_probe_idxs;
+	for (idx_t i = 0; i < source->types.size(); i++) {
+		bf_probe_idxs.emplace(i, i);
+	}
+
+	// Notify all joins that LIP should be run, and create BF pointers
+	for (auto &op : operators) {
+		switch (op.get().type) {
+		// TODO: what other operators modify the output order?
+		case PhysicalOperatorType::PROJECTION: {
+			auto &proj = op.get().Cast<PhysicalProjection>();
+			unordered_map<idx_t, idx_t> new_bf_probe_idxs;
+
+			// position in list is the output idx, value is input idx
+			for (idx_t out_idx = 0; out_idx < proj.select_list.size(); out_idx++) {
+				// TODO: other types of exprs?
+				if (proj.select_list[out_idx]->type != ExpressionType::BOUND_REF) {
+					continue;
+				}
+
+				auto &bound_ref = proj.select_list[out_idx].get()->Cast<BoundReferenceExpression>();
+				auto it = bf_probe_idxs.find(bound_ref.index);
+				if (it != bf_probe_idxs.end()) {
+					new_bf_probe_idxs.emplace(out_idx, it->second);
+				}
+			}
+
+			// TODO: need to clear bf_probe_idxs?
+			bf_probe_idxs = new_bf_probe_idxs;
+			break;
+		}
+		case PhysicalOperatorType::HASH_JOIN: {
+			auto &join = op.get().Cast<PhysicalHashJoin>();
+			D_ASSERT(join.join_supports_lip);
+			join.pipeline_supports_lip = true;
+
+			// Make bloom filters for all valid probe indices
+			for (auto &info : join.bf_probe_build) {
+				auto it = bf_probe_idxs.find(info.first);
+				if (it != bf_probe_idxs.end()) {
+					auto bf = make_shared_ptr<BloomFilter>();
+					join.bf_build.emplace_back(info.second, bf);
+					bf_probe.emplace_back(it->second, bf);
+				}
+			}
+			// TODO: does this change input/output indices
+			break;
+		}
+		default: {
+			break;
+		}
+		}
+	}
+
+	for (auto &info : bf_probe) {
+		std::cout << "probe idx: " << info.first << ", bf: " << info.second.get() << '\n';
+	}
 }
 
 void Pipeline::AddDependency(shared_ptr<Pipeline> &pipeline) {

@@ -5,6 +5,7 @@ add_subdirectory(pullup)
 add_subdirectory(pushdown)
 add_subdirectory(rule)
 add_subdirectory(statistics)
+add_subdirectory(lip)
 
 add_library_unity(
   duckdb_optimizer

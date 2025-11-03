@@ -27,6 +27,8 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
+#include <iostream>
+
 namespace duckdb {
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, PhysicalOperator &right,
@@ -46,11 +48,17 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 	unordered_map<idx_t, idx_t> build_columns_in_conditions;
 	for (idx_t cond_idx = 0; cond_idx < conditions.size(); cond_idx++) {
 		auto &condition = conditions[cond_idx];
+		// std::cout << condition.left->ToString() << " " << ExpressionTypeToString(condition.comparison) << " " << condition.right->ToString() << '\n';
 		condition_types.push_back(condition.left->return_type);
 		if (condition.right->GetExpressionClass() == ExpressionClass::BOUND_REF) {
 			build_columns_in_conditions.emplace(condition.right->Cast<BoundReferenceExpression>().index, cond_idx);
 		}
 	}
+	//
+	// // TODO: debug
+	// for (const auto &p : build_columns_in_conditions) {
+	// 	std::cout << p.first << " " << p.second << std::endl;
+	// }
 
 	auto &lhs_input_types = children[0].get().GetTypes();
 
@@ -62,6 +70,12 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			lhs_output_columns.col_idxs.emplace_back(i);
 		}
 	}
+	//
+	// std::cout << "lhs columns: ";
+	// for (auto a : lhs_output_columns.col_idxs) {
+	// 	std::cout << a << ' ';
+	// }
+	// std::cout << '\n';
 
 	for (auto &lhs_col : lhs_output_columns.col_idxs) {
 		auto &lhs_col_type = lhs_input_types[lhs_col];
@@ -83,6 +97,14 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			right_projection_map_copy.emplace_back(i);
 		}
 	}
+	//
+	// std::cout << "rhs columns pre: ";
+	// for (auto a : right_projection_map_copy) {
+	// 	std::cout << a << ' ';
+	// }
+	// // rhs_output_columns.col_idxs[1] = 2;
+	// // rhs_output_columns.col_idxs[2] = 1;
+	// std::cout << '\n';
 
 	// Now fill payload expressions/types and RHS columns/types
 	for (auto &rhs_col : right_projection_map_copy) {
@@ -99,6 +121,59 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			rhs_output_columns.col_idxs.push_back(it->second);
 		}
 		rhs_output_columns.col_types.push_back(rhs_col_type);
+	}
+	//
+	// std::cout << "rhs columns post: ";
+	// for (auto a : rhs_output_columns.col_idxs) {
+	// 	std::cout << a << ' ';
+	// }
+	// // rhs_output_columns.col_idxs[1] = 2;
+	// // rhs_output_columns.col_idxs[2] = 1;
+	// std::cout << '\n';
+	//
+	// std::cout << "payload columns: ";
+	// for (auto a : payload_columns.col_idxs) {
+	// 	std::cout << a << ' ';
+	// }
+	// std::cout << '\n';
+
+	/* LIP *******************************************************************/
+
+	// Does the join type allow us to perform LIP?
+	if (join_type == JoinType::LEFT || join_type == JoinType::OUTER ||
+		join_type == JoinType::RIGHT_ANTI || join_type == JoinType::RIGHT_SEMI ||
+		join_type == JoinType::SINGLE) {
+		// ANTI, SEMI, and MARK joins were already disallowed earlier
+		return;
+	}
+
+	// Even if no bloom filters are built here, rest of the pipeline can work
+	join_supports_lip = true;
+
+	// Extract columns to build on
+	for (auto &condition : conditions) {
+		// LIP only works on equi-joins
+		if (condition.comparison != ExpressionType::COMPARE_EQUAL) {
+			continue;
+		}
+
+		// LIP currently only works on directly bound references
+		// TODO: can LIP work on arbitrary/other expressions?
+		if (condition.left->GetExpressionClass() != ExpressionClass::BOUND_REF &&
+			condition.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+			continue;
+		}
+		std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
+
+		std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
+		std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
+		std::cout << PhysicalHashJoin::ToString();
+
+		// Could reserve space for every condition, but that is an overestimate
+		bf_probe_build.emplace_back(
+			condition.left->Cast<BoundReferenceExpression>().index,
+			condition.right->Cast<BoundReferenceExpression>().index
+		);
 	}
 }
 
@@ -160,6 +235,27 @@ public:
 			}
 			global_filter_state = op.filter_pushdown->GetGlobalState(context, op);
 		}
+
+		/* LIP *******************************************************************/
+
+		// TODO: clear physical operator?
+		// Initialize the bloom filters if we are in a LIP pipeline
+		if (op.pipeline_supports_lip) {
+			D_ASSERT(op.join_supports_lip);
+			// TODO: is std:move necessary/useful?
+			bf_build = std::move(op.bf_build);
+			std::cout << "pipeline:\n";
+			for (auto &info : bf_build) {
+				std::cout << " build idx: " << info.first << ", bf: " << info.second.get() << '\n';
+				// std::cout << "  build idx: " << info.first << "\n";
+				// TODO: is there a better size estimate?
+				info.second->Initialize(context, op.estimated_cardinality);
+			}
+			std::cout << op.ToString();
+		} else {
+			std::cout << "no lip :(\n";
+		}
+		// TODO: op.bf_probe_build is cleared by pipeline?
 	}
 
 	void ScheduleFinalize(Pipeline &pipeline, Event &event);
@@ -201,6 +297,11 @@ public:
 
 	bool skip_filter_pushdown = false;
 	unique_ptr<JoinFilterGlobalState> global_filter_state;
+
+	/* LIP *******************************************************************/
+
+	//! The final (build, BF) pairs for the join (set by pipeline)
+	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_build;
 };
 
 unique_ptr<JoinFilterLocalState> JoinFilterPushdownInfo::GetLocalState(JoinFilterGlobalState &gstate) const {
@@ -339,6 +440,17 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 
 	// build the HT
 	lstate.hash_table->Build(lstate.append_state, lstate.join_keys, lstate.payload_chunk);
+
+	if (pipeline_supports_lip) {
+		for (auto &info : bf_build) {
+			auto build_idx = info.first;
+			auto &bf = info.second;
+
+			// TODO: there is surely a better way to do this
+			//  e.g. using join_keys, or perhaps batching all cols into 1 BF?
+			bf->Insert(chunk, {build_idx});
+		}
+	}
 
 	return SinkResultType::NEED_MORE_INPUT;
 }
