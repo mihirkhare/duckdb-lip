@@ -72,6 +72,9 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 		return;
 	case PhysicalOperatorType::CROSS_PRODUCT:
 		return;
+	case PhysicalOperatorType::HASH_JOIN:
+		// TODO: when to
+		break;
 	default:
 		break;
 	}

@@ -15,6 +15,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/reference_map.hpp"
+#include "duckdb/optimizer/lip/bloom_filter.hpp"
 #include "duckdb/parallel/executor_task.hpp"
 
 namespace duckdb {
@@ -81,6 +82,12 @@ public:
 	explicit Pipeline(Executor &execution_context);
 
 	Executor &executor;
+
+	/* LIP *******************************************************************/
+
+	// TODO: currently no need for pipeline to track if LIP is being performed
+	//! The (probe, BF) pairs for this pipeline, if any
+	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_probe;
 
 public:
 	ClientContext &GetClientContext();

@@ -2,6 +2,7 @@
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
+#include <iostream>
 
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <chrono>
@@ -526,6 +527,29 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	auto res = GetData(result, source_input);
+
+	// size_t cnt = 0;
+	for (auto &info : pipeline.bf_probe) {
+		vector<uint32_t> probe_results(result.size());
+		auto sel = SelectionVector(result.size());
+		auto probe_idx = info.first;
+		auto &bf = info.second;
+		std::cout << "  probe idx: " << info.first << " on bf " << bf.get() << '\n';
+
+		// TODO: there has to be a better way to do this lmao
+		//  e.g. Lookup can just return a new chunk ? or at least a sel vector
+		bf->Lookup(result, probe_results, {probe_idx});
+		idx_t result_count = 0;
+		for (idx_t i = 0; i < result.size(); i++) {
+			if (probe_results[i] > 0) {
+				sel.set_index(result_count, i);
+				result_count++;
+			}
+		}
+		result.Slice(sel, result_count);
+		// if (cnt >= 0) break;
+		// cnt++;
+	}
 
 	// Ensures sources only return empty results when Blocking or Finished
 	D_ASSERT(res != SourceResultType::BLOCKED || result.size() == 0);
