@@ -63,6 +63,7 @@ public:
 
 	bool ParallelOperator() const override {
 		return true;
+
 	}
 
 protected:
