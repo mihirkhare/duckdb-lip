@@ -3,6 +3,8 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
+#include <iostream>
+
 namespace duckdb {
 
 class ProjectionState : public OperatorState {
@@ -23,6 +25,15 @@ PhysicalProjection::PhysicalProjection(vector<LogicalType> types, vector<unique_
                                        idx_t estimated_cardinality)
     : PhysicalOperator(PhysicalOperatorType::PROJECTION, std::move(types), estimated_cardinality),
       select_list(std::move(select_list)) {
+
+	// std::cout << "Projection:\n";
+	// for (auto &expr : this->select_list) {
+	// 	if (expr->type != ExpressionType::BOUND_REF) {
+	// 		continue;
+	// 	}
+	// 	std::cout << "  " << expr->ToString() << " = " << expr->Cast<BoundReferenceExpression>().index << '\n';
+	// }
+	// std::cout << '\n';
 }
 
 OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,

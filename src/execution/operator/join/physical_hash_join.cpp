@@ -163,11 +163,11 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			condition.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
 			continue;
 		}
-		std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
-
-		std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
-		std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
-		std::cout << PhysicalHashJoin::ToString();
+		// std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
+		//
+		// std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
+		// std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
+		// std::cout << PhysicalHashJoin::ToString();
 
 		// Could reserve space for every condition, but that is an overestimate
 		bf_probe_build.emplace_back(
@@ -244,17 +244,18 @@ public:
 			D_ASSERT(op.join_supports_lip);
 			// TODO: is std:move necessary/useful?
 			bf_build = std::move(op.bf_build);
-			std::cout << "pipeline:\n";
+			// std::cout << "pipeline:\n";
 			for (auto &info : bf_build) {
-				std::cout << " build idx: " << info.first << ", bf: " << info.second.get() << '\n';
+				// std::cout << " build idx: " << info.first << ", bf: " << info.second.get() << '\n';
 				// std::cout << "  build idx: " << info.first << "\n";
 				// TODO: is there a better size estimate?
 				info.second->Initialize(context, op.estimated_cardinality);
 			}
-			std::cout << op.ToString();
-		} else {
-			std::cout << "no lip :(\n";
+			// std::cout << op.ToString();
 		}
+		// else {
+		// 	std::cout << "no lip :(\n";
+		// }
 		// TODO: op.bf_probe_build is cleared by pipeline?
 	}
 

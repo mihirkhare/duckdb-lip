@@ -534,7 +534,7 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 		auto sel = SelectionVector(result.size());
 		auto probe_idx = info.first;
 		auto &bf = info.second;
-		std::cout << "  probe idx: " << info.first << " on bf " << bf.get() << '\n';
+		// std::cout << "  probe idx: " << info.first << " on bf " << bf.get() << '\n';
 
 		// TODO: there has to be a better way to do this lmao
 		//  e.g. Lookup can just return a new chunk ? or at least a sel vector
