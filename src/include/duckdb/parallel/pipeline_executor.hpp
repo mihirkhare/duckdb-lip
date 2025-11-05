@@ -131,6 +131,23 @@ private:
 	//! Whether the current flushing_idx should be flushed: this needs to be stored to make flushing code re-entrant
 	bool should_flush_current_idx = true;
 
+	/* LIP *******************************************************************/
+
+	//! The initial (probe, BF) pairs for this pipeline, if any
+	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_probe;
+	//! Current chunks processed in batch
+	size_t chunks_processed = 0;
+	//! Total chunks in batch
+	size_t batch_size = 1;
+	//! Miss count of each BF
+	vector<size_t> bf_miss_counts;
+	//! Total counts of each BF
+	vector<size_t> bf_total_counts;
+	//! Probe BF at index bf_idx and update miss/totals
+	void ProbeBF(idx_t bf_idx, DataChunk &result);
+	//! On batch completion, reorder BFs
+	void ReorderProbes();
+
 private:
 	void StartOperator(PhysicalOperator &op);
 	void EndOperator(PhysicalOperator &op, optional_ptr<DataChunk> chunk);

@@ -85,8 +85,9 @@ public:
 
 	/* LIP *******************************************************************/
 
-	// TODO: currently no need for pipeline to track if LIP is being performed
-	//! The (probe, BF) pairs for this pipeline, if any
+	//! Whether or not the pipeline supports LIP
+	bool pipeline_supports_lip = false;
+	//! The initial (probe, BF) pairs for this pipeline, if any
 	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_probe;
 
 public:

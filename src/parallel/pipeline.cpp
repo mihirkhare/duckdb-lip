@@ -287,6 +287,9 @@ void Pipeline::Ready() {
 		}
 	}
 
+	// We should run LIP
+	pipeline_supports_lip = true;
+
 	// Map "index at join to probe" -> "real index at source"
 	unordered_map<idx_t, idx_t> bf_probe_idxs;
 	for (idx_t i = 0; i < source->types.size(); i++) {

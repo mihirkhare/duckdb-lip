@@ -2,6 +2,8 @@
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "fmt/format.h"
+
 #include <iostream>
 
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
@@ -12,7 +14,9 @@
 namespace duckdb {
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
-    : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
+    : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p),
+	  bf_probe(pipeline.bf_probe), bf_miss_counts(bf_probe.size()), bf_total_counts(bf_probe.size()) {
+	// std::cout << duckdb_fmt::format("making executor {} on pipeline with sink {}\n", (void*) this, pipeline.sink ? (void*) pipeline.sink.get() : nullptr);
 	D_ASSERT(pipeline.source_state);
 	if (pipeline.sink) {
 		local_sink_state = pipeline.sink->GetLocalSinkState(context);
@@ -186,6 +190,9 @@ SinkNextBatchType PipelineExecutor::NextBatch(DataChunk &source_chunk) {
 
 PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
+
+	// std::cout << duckdb_fmt::format("executor {} executing pipeline with sink {}\n", (void*) this, pipeline.sink ? (void*) pipeline.sink.get() : nullptr);
+
 	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
 	ExecutionBudget chunk_budget(max_chunks);
 	do {
@@ -522,33 +529,85 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 	return pipeline.sink->Sink(context, chunk, input);
 }
 
+void PipelineExecutor::ProbeBF(idx_t bf_idx, DataChunk &result) {
+	auto &info = bf_probe[bf_idx];
+	auto probe_idx = info.first;
+	auto &bf = info.second;
+
+	vector<uint32_t> probe_results(result.size());
+	auto sel = SelectionVector(result.size());
+
+	// TODO: there has to be a better way to do this lmao
+	//  e.g. Lookup can just return a new chunk ? or at least a sel vector
+	bf->Lookup(result, probe_results, {probe_idx});
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < result.size(); i++) {
+		if (probe_results[i] > 0) {
+			sel.set_index(result_count, i);
+			result_count++;
+		}
+	}
+	bf_miss_counts[bf_idx] += result.size() - result_count;
+	bf_total_counts[bf_idx] += result.size();
+
+	result.Slice(sel, result_count);
+}
+
+void PipelineExecutor::ReorderProbes() {
+	D_ASSERT(chunks_processed == batch_size);
+
+	vector<pair<idx_t, shared_ptr<BloomFilter>>> reordered_bf;
+	reordered_bf.reserve(bf_miss_counts.size());
+	vector<pair<double, idx_t>> bf_miss_percentages(bf_miss_counts.size());
+
+	// std::cout << "miss size: " << bf_miss_counts.size() << ", num filters: " << pipeline.bf_probe.size() << "\n";
+	for (size_t i = 0; i < bf_miss_counts.size(); i++) {
+		// std::cout << "hello\n";
+		auto bf_miss_count = bf_miss_counts[i];
+		// std::cout << "its me\n";
+		auto bf_total_count = bf_total_counts[i];
+		if (bf_total_count == 0) {
+			bf_miss_percentages.emplace_back(0.0, i);
+			continue;
+		}
+		auto bf_miss_percentage = (double) bf_miss_count / (double) bf_total_count;
+		bf_miss_percentages.emplace_back(bf_miss_percentage, i);
+	}
+
+	std::sort(bf_miss_percentages.begin(), bf_miss_percentages.end());
+	for (auto &pair : bf_miss_percentages) {
+		auto bf_idx = pair.second;
+		// std::cout << "wondering\n";
+		reordered_bf.push_back(bf_probe[bf_idx]);
+	}
+	bf_probe = reordered_bf;
+}
+
 SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	auto res = GetData(result, source_input);
 
-	// size_t cnt = 0;
-	for (auto &info : pipeline.bf_probe) {
-		vector<uint32_t> probe_results(result.size());
-		auto sel = SelectionVector(result.size());
-		auto probe_idx = info.first;
-		auto &bf = info.second;
-		// std::cout << "  probe idx: " << info.first << " on bf " << bf.get() << '\n';
+	if (pipeline.pipeline_supports_lip) {
+		for (size_t i = 0; i < pipeline.bf_probe.size(); i++) {
+			ProbeBF(i, result);
+		}
 
-		// TODO: there has to be a better way to do this lmao
-		//  e.g. Lookup can just return a new chunk ? or at least a sel vector
-		bf->Lookup(result, probe_results, {probe_idx});
-		idx_t result_count = 0;
-		for (idx_t i = 0; i < result.size(); i++) {
-			if (probe_results[i] > 0) {
-				sel.set_index(result_count, i);
-				result_count++;
+		chunks_processed++;
+		if (chunks_processed == batch_size) {
+			ReorderProbes();
+
+			// Reset state for next batch
+			chunks_processed = 0;
+			batch_size *= 2;
+			for (size_t i = 0; i < bf_miss_counts.size(); i++) {
+				bf_miss_counts[i] = 0;
+			}
+			for (size_t i = 0; i < bf_total_counts.size(); i++) {
+				bf_total_counts[i] = 0;
 			}
 		}
-		result.Slice(sel, result_count);
-		// if (cnt >= 0) break;
-		// cnt++;
 	}
 
 	// Ensures sources only return empty results when Blocking or Finished
