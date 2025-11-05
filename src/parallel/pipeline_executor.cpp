@@ -563,14 +563,14 @@ void PipelineExecutor::ReorderProbes() {
 	// std::cout << "miss size: " << bf_miss_counts.size() << ", num filters: " << pipeline.bf_probe.size() << "\n";
 	for (size_t i = 0; i < bf_miss_counts.size(); i++) {
 		// std::cout << "hello\n";
-		auto bf_miss_count = bf_miss_counts[i];
+		size_t bf_miss_count = bf_miss_counts[i];
 		// std::cout << "its me\n";
-		auto bf_total_count = bf_total_counts[i];
+		size_t bf_total_count = bf_total_counts[i];
 		if (bf_total_count == 0) {
 			bf_miss_percentages.emplace_back(0.0, i);
 			continue;
 		}
-		auto bf_miss_percentage = (double) bf_miss_count / (double) bf_total_count;
+		double bf_miss_percentage = static_cast<double>(bf_miss_count) / static_cast<double>(bf_total_count);
 		bf_miss_percentages.emplace_back(bf_miss_percentage, i);
 	}
 

@@ -259,7 +259,7 @@ void Pipeline::Ready() {
 		return;
 	}
 
-	// std::cout << "processing pipeline:\n" << ToString();
+	std::cout << "processing pipeline:\n" << ToString();
 
 	// TODO: on failing return, go and clear all the bloom filters
 
@@ -293,18 +293,18 @@ void Pipeline::Ready() {
 	// Map "index at join to probe" -> "real index at source"
 	unordered_map<idx_t, idx_t> bf_probe_idxs;
 	for (idx_t i = 0; i < source->types.size(); i++) {
-		// std::cout << source->types[i].ToString() << ", ";
+		std::cout << source->types[i].ToString() << ", ";
 		bf_probe_idxs.emplace(i, i);
 	}
-	// std::cout << '\n';
+	std::cout << '\n';
 
 	// Notify all joins that LIP should be run, and create BF pointers
 	for (auto &op : operators) {
-		// std::cout << '{';
-		// for (auto &map : bf_probe_idxs) {
-		// 	std::cout << map.first << " -> " << map.second << ", ";
-		// }
-		// std::cout << "}\n";
+		std::cout << '{';
+		for (auto &map : bf_probe_idxs) {
+			std::cout << map.first << " -> " << map.second << ", ";
+		}
+		std::cout << "}\n";
 
 		switch (op.get().type) {
 		// TODO: what other operators modify the output order?
@@ -338,6 +338,10 @@ void Pipeline::Ready() {
 			D_ASSERT(join.bf_build.empty());
 			join.pipeline_supports_lip = true;
 
+			// Map RHS idxs to equivalent LHS idxs
+			// TODO: what if multiple join conditions have the same RHS col?
+			unordered_map<idx_t, idx_t> equiv_cols;
+
 			// Make bloom filters for all valid probe indices
 			for (auto &info : join.bf_probe_build) {
 				auto it = bf_probe_idxs.find(info.first);
@@ -346,33 +350,29 @@ void Pipeline::Ready() {
 
 					join.bf_build.emplace_back(info.second, bf);
 					bf_probe.emplace_back(it->second, bf);
+					equiv_cols.emplace(info.second, it->second);
 				}
 			}
 
 			// Update output order for non-join-keys
-			idx_t out_idx;
-			for (out_idx = 0; out_idx < join.lhs_output_columns.col_idxs.size(); out_idx++) {
+			idx_t left_idx;
+			for (left_idx = 0; left_idx < join.lhs_output_columns.col_idxs.size(); left_idx++) {
 				// position in list is the output idx, value is input idx
-				auto it = bf_probe_idxs.find(join.lhs_output_columns.col_idxs[out_idx]);
+				auto it = bf_probe_idxs.find(join.lhs_output_columns.col_idxs[left_idx]);
 				if (it != bf_probe_idxs.end()) {
-					new_bf_probe_idxs.emplace(out_idx, it->second);
+					new_bf_probe_idxs.emplace(left_idx, it->second);
 				}
 			}
 
 			// Update output order for join keys
-			for (idx_t sel_idx = 0; sel_idx < join.conditions.size(); sel_idx++) {
-				if (join.conditions[sel_idx].left->type != ExpressionType::BOUND_REF) {
-					continue;
-				}
-
-				auto &bound_ref = join.conditions[sel_idx].left->Cast<BoundReferenceExpression>();
-				auto it = bf_probe_idxs.find(bound_ref.index);
-				if (it != bf_probe_idxs.end()) {
-					new_bf_probe_idxs.emplace(out_idx + sel_idx, it->second);
+			for (idx_t right_idx = 0; right_idx < join.rhs_output_columns.col_idxs.size(); right_idx++) {
+				auto it = equiv_cols.find(join.rhs_output_columns.col_idxs[right_idx]);
+				if (it != equiv_cols.end()) {
+					new_bf_probe_idxs.emplace(left_idx + right_idx, it->second);
 				}
 			}
 
-			bf_probe_idxs = new_bf_probe_idxs;
+			bf_probe_idxs = std::move(new_bf_probe_idxs);
 			break;
 		}
 		default: {

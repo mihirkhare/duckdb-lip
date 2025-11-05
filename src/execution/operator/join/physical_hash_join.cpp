@@ -39,6 +39,13 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
     : PhysicalComparisonJoin(op, PhysicalOperatorType::HASH_JOIN, std::move(cond), join_type, estimated_cardinality),
       delim_types(std::move(delim_types)) {
 
+	auto outputcols = op.GetColumnBindings();
+	std::cout << "output columns for join:\n";
+	for (auto &col : outputcols) {
+		std::cout << col.ToString() << ", ";
+	}
+	std::cout << '\n';
+
 	filter_pushdown = std::move(pushdown_info_p);
 
 	children.push_back(left);
@@ -137,6 +144,15 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 	// }
 	// std::cout << '\n';
 
+	std::cout << "output mapping: ";
+	for (auto a : lhs_output_columns.col_idxs) {
+		std::cout << a << ", ";
+	}
+	for (auto a : rhs_output_columns.col_idxs) {
+		std::cout << a << ", ";
+	}
+	std::cout << '\n';
+
 	/* LIP *******************************************************************/
 
 	// Does the join type allow us to perform LIP?
@@ -163,11 +179,10 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			condition.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
 			continue;
 		}
-		// std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
-		//
-		// std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
-		// std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
-		// std::cout << PhysicalHashJoin::ToString();
+		std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
+
+		std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
+		std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
 
 		// Could reserve space for every condition, but that is an overestimate
 		bf_probe_build.emplace_back(
@@ -175,6 +190,7 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 			condition.right->Cast<BoundReferenceExpression>().index
 		);
 	}
+	std::cout << PhysicalHashJoin::ToString();
 }
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, PhysicalOperator &right,
