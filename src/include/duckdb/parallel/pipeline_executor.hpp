@@ -144,7 +144,7 @@ private:
 	//! Total counts of each BF
 	vector<size_t> bf_total_counts;
 	//! Probe BF at index bf_idx and update miss/totals
-	void ProbeBF(idx_t bf_idx, DataChunk &result);
+	void ProbeBF(idx_t bf_idx, DataChunk &chunk);
 	//! On batch completion, reorder BFs
 	void ReorderProbes();
 

@@ -259,7 +259,7 @@ void Pipeline::Ready() {
 		return;
 	}
 
-	std::cout << "processing pipeline:\n" << ToString();
+	// std::cout << "processing pipeline:\n" << ToString();
 
 	// TODO: on failing return, go and clear all the bloom filters
 
@@ -293,18 +293,18 @@ void Pipeline::Ready() {
 	// Map "index at join to probe" -> "real index at source"
 	unordered_map<idx_t, idx_t> bf_probe_idxs;
 	for (idx_t i = 0; i < source->types.size(); i++) {
-		std::cout << source->types[i].ToString() << ", ";
+		// std::cout << source->types[i].ToString() << ", ";
 		bf_probe_idxs.emplace(i, i);
 	}
-	std::cout << '\n';
+	// std::cout << '\n';
 
 	// Notify all joins that LIP should be run, and create BF pointers
 	for (auto &op : operators) {
-		std::cout << '{';
-		for (auto &map : bf_probe_idxs) {
-			std::cout << map.first << " -> " << map.second << ", ";
-		}
-		std::cout << "}\n";
+		// std::cout << '{';
+		// for (auto &map : bf_probe_idxs) {
+		// 	std::cout << map.first << " -> " << map.second << ", ";
+		// }
+		// std::cout << "}\n";
 
 		switch (op.get().type) {
 		// TODO: what other operators modify the output order?

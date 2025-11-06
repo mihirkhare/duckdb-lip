@@ -529,28 +529,33 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 	return pipeline.sink->Sink(context, chunk, input);
 }
 
-void PipelineExecutor::ProbeBF(idx_t bf_idx, DataChunk &result) {
+void PipelineExecutor::ProbeBF(idx_t bf_idx, DataChunk &chunk) {
 	auto &info = bf_probe[bf_idx];
 	auto probe_idx = info.first;
 	auto &bf = info.second;
 
-	vector<uint32_t> probe_results(result.size());
-	auto sel = SelectionVector(result.size());
+	vector<uint32_t> probe_results(chunk.size());
+	auto sel = SelectionVector(chunk.size());
 
 	// TODO: there has to be a better way to do this lmao
 	//  e.g. Lookup can just return a new chunk ? or at least a sel vector
-	bf->Lookup(result, probe_results, {probe_idx});
-	idx_t result_count = 0;
-	for (idx_t i = 0; i < result.size(); i++) {
-		if (probe_results[i] > 0) {
-			sel.set_index(result_count, i);
-			result_count++;
-		}
-	}
-	bf_miss_counts[bf_idx] += result.size() - result_count;
-	bf_total_counts[bf_idx] += result.size();
+	bf->Lookup(chunk, probe_results, {probe_idx});
 
-	result.Slice(sel, result_count);
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < chunk.size(); i++) {
+		sel.set_index(result_count, i);
+		result_count += probe_results[i];
+		// if (probe_results[i] > 0) {
+		// 	sel.set_index(result_count, i);
+		// 	result_count++;
+		// }
+	}
+	bf_miss_counts[bf_idx] += chunk.size() - result_count;
+	bf_total_counts[bf_idx] += chunk.size();
+
+	if (result_count != chunk.size()) {
+		chunk.Slice(sel, result_count);
+	}
 }
 
 void PipelineExecutor::ReorderProbes() {
