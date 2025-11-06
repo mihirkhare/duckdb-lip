@@ -4,6 +4,7 @@
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
+#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -154,6 +155,13 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 		join_type == JoinType::RIGHT_ANTI || join_type == JoinType::RIGHT_SEMI ||
 		join_type == JoinType::SINGLE) {
 		// ANTI, SEMI, and MARK joins were already disallowed earlier
+		return;
+	}
+
+	// Is the build side an unfiltered scan?
+	if (children[1].get().type != PhysicalOperatorType::TABLE_SCAN ||
+		!children[1].get().Cast<PhysicalTableScan>().table_filters) {
+		// Want to have some filtering on the RHS
 		return;
 	}
 
