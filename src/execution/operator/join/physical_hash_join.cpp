@@ -159,7 +159,7 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 	}
 
 	// Is the build side an unfiltered scan?
-	if (children[1].get().type != PhysicalOperatorType::TABLE_SCAN ||
+	if (children[1].get().type == PhysicalOperatorType::TABLE_SCAN &&
 		!children[1].get().Cast<PhysicalTableScan>().table_filters) {
 		// Want to have some filtering on the RHS
 		return;
@@ -959,6 +959,12 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
                                             OperatorSinkFinalizeInput &input) const {
 	auto &sink = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &ht = *sink.hash_table;
+
+	if (pipeline_supports_lip) {
+		for (auto &info : bf_build) {
+			info.second->Finalize();
+		}
+	}
 
 	sink.temporary_memory_state->UpdateReservation(context);
 	sink.external = sink.temporary_memory_state->GetReservation() < sink.total_size;

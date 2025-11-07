@@ -45,11 +45,13 @@ public:
 public:
 	int Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied) const;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built);
+	void Finalize();
 
 	uint32_t num_sectors;
 	uint32_t num_sectors_log;
 
-	std::atomic<uint32_t> *blocks;
+	std::atomic<uint32_t> *insert_blocks;
+	uint32_t *probe_blocks;
 
 private:
 	// key_lo |5:bit3|5:bit2|5:bit1|  13:block    |4:sector1 | bit layout (32:total)
@@ -84,7 +86,7 @@ private:
 		bf[sector1].fetch_or(mask1, std::memory_order_relaxed);
 		bf[sector2].fetch_or(mask2, std::memory_order_relaxed);
 	}
-	inline bool LookupOne(uint32_t key_lo, uint32_t key_hi, const std::atomic<uint32_t> *BF_RESTRICT bf) const {
+	inline bool LookupOne(uint32_t key_lo, uint32_t key_hi, const uint32_t *BF_RESTRICT bf) const {
 		uint32_t sector1 = GetSector1(key_lo, key_hi);
 		uint32_t mask1 = GetMask1(key_lo);
 		uint32_t sector2 = GetSector2(key_hi, sector1);
@@ -93,7 +95,7 @@ private:
 	}
 
 private:
-	int BloomFilterLookup(int num, const uint64_t *BF_RESTRICT key64, const std::atomic<uint32_t> *BF_RESTRICT bf,
+	int BloomFilterLookup(int num, const uint64_t *BF_RESTRICT key64, const uint32_t *BF_RESTRICT bf,
 	                      uint32_t *BF_RESTRICT out) const {
 		const uint32_t *BF_RESTRICT key = reinterpret_cast<const uint32_t * BF_RESTRICT>(key64);
 		for (int i = 0; i + SIMD_BATCH_SIZE <= num; i += SIMD_BATCH_SIZE) {
