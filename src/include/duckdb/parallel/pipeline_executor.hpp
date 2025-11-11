@@ -137,11 +137,11 @@ public:
 			size_t bf_miss_count = bf_miss_counts[i];
 			size_t bf_total_count = bf_total_counts[i];
 			if (bf_total_count == 0) {
-				bf_miss_percentages.emplace_back(0.0, probe_order[i]);
+				bf_miss_percentages[i] = {0.0, probe_order[i]};
 				continue;
 			}
 			double bf_miss_percentage = static_cast<double>(bf_miss_count) / static_cast<double>(bf_total_count);
-			bf_miss_percentages.emplace_back(bf_miss_percentage, probe_order[i]);
+			bf_miss_percentages[i] = {bf_miss_percentage, probe_order[i]};
 		}
 
 		std::sort(bf_miss_percentages.begin(), bf_miss_percentages.end());

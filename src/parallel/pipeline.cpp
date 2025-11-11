@@ -50,15 +50,21 @@ public:
 	explicit LIPPlanInfo(Pipeline *lip_pipeline) : lip_pipeline(lip_pipeline) {}
 
 	bool IsLIPSupported() {
+		std::cout << "Validating pipeline:\n" << lip_pipeline->ToString();
+
 		// Probe pipelines have a non-hash-join source
 		if (!NonHashJoinSource()) {
 			return false;
 		}
 
+		std::cout << "- Valid source\n";
+
 		// All joins must support LIP
 		if (!ValidateAndBuildAllJoins()) {
 			return false;
 		}
+
+		std::cout << "- Valid joins\n";
 
 		return true;
 	}
@@ -90,12 +96,84 @@ private:
 
 	static bool ValidateBuildSide(PhysicalOperator &build) {
 		// Want to have some filtering on the RHS
-
-		// Is the build side an unfiltered scan?
-		if (build.type == PhysicalOperatorType::TABLE_SCAN &&
-			!build.Cast<PhysicalTableScan>().table_filters) {
+		switch (build.type) {
+		case PhysicalOperatorType::ORDER_BY:
+			break;
+		case PhysicalOperatorType::LIMIT:
+			break;
+		case PhysicalOperatorType::STREAMING_LIMIT:
+			break;
+		case PhysicalOperatorType::LIMIT_PERCENT:
+			break;
+		case PhysicalOperatorType::TOP_N:
+			break;
+		case PhysicalOperatorType::WINDOW:
+			break;
+		case PhysicalOperatorType::UNNEST:
+			break;
+		case PhysicalOperatorType::UNGROUPED_AGGREGATE:
+			break;
+		case PhysicalOperatorType::HASH_GROUP_BY:
+			break;
+		case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
+			break;
+		case PhysicalOperatorType::PARTITIONED_AGGREGATE:
+			break;
+		case PhysicalOperatorType::FILTER:
+			break;
+		case PhysicalOperatorType::PROJECTION:
+			break;
+		case PhysicalOperatorType::RESERVOIR_SAMPLE:
+			break;
+		case PhysicalOperatorType::STREAMING_SAMPLE:
+			break;
+		case PhysicalOperatorType::STREAMING_WINDOW:
+			break;
+		case PhysicalOperatorType::TABLE_SCAN: {
+			if (!build.Cast<PhysicalTableScan>().table_filters) {
+				return false;
+			}
+			break;
+		}
+		case PhysicalOperatorType::COLUMN_DATA_SCAN:
+			break;
+		case PhysicalOperatorType::CHUNK_SCAN:
+			break;
+		case PhysicalOperatorType::RECURSIVE_CTE_SCAN:
+			break;
+		case PhysicalOperatorType::RECURSIVE_RECURRING_CTE_SCAN:
+			break;
+		case PhysicalOperatorType::CTE_SCAN:
+			break;
+		case PhysicalOperatorType::EXPRESSION_SCAN:
+			break;
+		case PhysicalOperatorType::POSITIONAL_SCAN:
+			break;
+		case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
+			break;
+		case PhysicalOperatorType::NESTED_LOOP_JOIN:
+			break;
+		case PhysicalOperatorType::HASH_JOIN:
+			break;
+		case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
+			break;
+		case PhysicalOperatorType::IE_JOIN:
+			break;
+		case PhysicalOperatorType::LEFT_DELIM_JOIN:
+			break;
+		case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+			break;
+		case PhysicalOperatorType::POSITIONAL_JOIN:
+			break;
+		case PhysicalOperatorType::ASOF_JOIN:
+			break;
+		case PhysicalOperatorType::UNION:
+			break;
+		default: {
 			return false;
 		}
+		}
+
 		return true;
 	}
 
@@ -245,17 +323,26 @@ private:
 		}
 	}
 
+	// static void PrintColumnBindings(const unordered_map<idx_t, idx_t> &column_bindings) {
+	// 	std::cout << "curr column bindings:\n";
+	// 	for (auto &kv : column_bindings) {
+	// 		std::cout << "- ." << kv.first << " -> " << kv.second << '\n';
+	// 	}
+	// }
+
 	bool ValidateAndBuildAllJoins() {
 		// Map index at current operator to index at source
 		unordered_map<idx_t, idx_t> column_bindings;
 		GetInitialColumnBindings(column_bindings);
 
 		// Validate that everything in the pipeline is a hash join allowing LIP
-		auto operators = lip_pipeline->GetOperators();
+		auto operators = lip_pipeline->GetIntermediateOperators();
 		for (auto &op : operators) {
+			// std::cout << "Looking at operator of type " << duckdb::PhysicalOperatorToString(op.get().type) << '\n';
 			switch (op.get().type) {
 			case PhysicalOperatorType::HASH_JOIN: {
 				if (!ValidateAndBuildJoin(&op.get().Cast<PhysicalHashJoin>(), column_bindings)) {
+					// std::cout << "Invalid join:\n" << op.get().ToString();
 					return false;
 				}
 				UpdateColumnBindings(op.get(), column_bindings);
