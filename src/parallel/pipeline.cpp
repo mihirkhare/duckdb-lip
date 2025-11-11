@@ -18,6 +18,276 @@
 
 #include <iostream>
 
+namespace {
+using duckdb::vector;
+using duckdb::pair;
+using duckdb::unordered_map;
+
+using duckdb::make_shared_ptr;
+using duckdb::make_pair;
+
+using duckdb::Pipeline;
+
+using duckdb::PhysicalOperatorType;
+using duckdb::JoinType;
+using duckdb::ExpressionType;
+using duckdb::ExpressionClass;
+using duckdb::BoundReferenceExpression;
+using duckdb::PhysicalProjection;
+
+using duckdb::JoinCondition;
+
+using duckdb::PhysicalOperator;
+using duckdb::PhysicalHashJoin;
+using duckdb::PhysicalTableScan;
+
+using duckdb::LIPBloomFilter;
+
+class LIPPlanInfo {
+public:
+	LIPPlanInfo() = delete;
+
+	explicit LIPPlanInfo(Pipeline *lip_pipeline) : lip_pipeline(lip_pipeline) {}
+
+	bool IsLIPSupported() {
+		// Probe pipelines have a non-hash-join source
+		if (!NonHashJoinSource()) {
+			return false;
+		}
+
+		// All joins must support LIP
+		if (!ValidateAndBuildAllJoins()) {
+			return false;
+		}
+
+		return true;
+	}
+
+	void LinkLIPJoins() {
+		for (auto &join_data : lip_data) {
+			auto &cols = join_data.first;
+			auto &build_cols = cols.first;
+			auto &probe_cols = cols.second;
+			auto &join = join_data.second;
+
+			auto lip_info = make_shared_ptr<LIPBloomFilter>(build_cols, probe_cols);
+			join->lip_filter = lip_info;
+			lip_pipeline->lip_filters.push_back(lip_info);
+		}
+	}
+
+private:
+	Pipeline *lip_pipeline;
+	vector<pair<pair<vector<idx_t>, vector<idx_t>>, PhysicalHashJoin *>> lip_data;
+
+	bool NonHashJoinSource() const {
+		// Hash join sources are only used for external joins, which can be
+		//  ignored for LIP
+		// TODO: verify above
+		auto source = lip_pipeline->GetSource();
+		return source && source->type != PhysicalOperatorType::HASH_JOIN;
+	}
+
+	static bool ValidateBuildSide(PhysicalOperator &build) {
+		// Want to have some filtering on the RHS
+
+		// Is the build side an unfiltered scan?
+		if (build.type == PhysicalOperatorType::TABLE_SCAN &&
+			!build.Cast<PhysicalTableScan>().table_filters) {
+			return false;
+		}
+		return true;
+	}
+
+	void BuildJoinConditions(PhysicalHashJoin *join, const unordered_map<idx_t, idx_t> &column_bindings) {
+		vector<idx_t> build_cols;
+		vector<idx_t> probe_cols;
+
+		for (auto &cond : join->conditions) {
+			// LIP only works on equi-joins
+			if (cond.comparison != ExpressionType::COMPARE_EQUAL) {
+				continue;
+			}
+
+			// LIP currently only works on directly bound references
+			// TODO: can LIP work on arbitrary/other expressions?
+			if (cond.left->GetExpressionClass() != ExpressionClass::BOUND_REF &&
+				cond.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+				continue;
+			}
+
+			idx_t left_idx = cond.left->Cast<BoundReferenceExpression>().index;
+			idx_t right_idx = cond.right->Cast<BoundReferenceExpression>().index;
+
+			// Check that the left-hand side references the source
+			auto it = column_bindings.find(left_idx);
+			if (it == column_bindings.end()) {
+				continue;
+			}
+
+			probe_cols.push_back(it->second);
+			build_cols.push_back(right_idx);
+
+			// std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
+			//
+			// std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
+			// std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
+		}
+
+		// Only register as valid for LIP if at least one join condition is valid
+		if (!build_cols.empty()) {
+			auto cols = make_pair(build_cols, probe_cols);
+			lip_data.emplace_back(cols, join);
+		}
+	}
+
+	bool ValidateAndBuildJoin(PhysicalHashJoin *join, const unordered_map<idx_t, idx_t> &column_bindings) {
+		// Does the join type allow us to perform LIP?
+		switch (join->join_type) {
+		case JoinType::INNER:
+		case JoinType::RIGHT:
+			break;
+		default:
+			return false;
+		}
+
+		// Is the build side valid for LIP?
+		if (!ValidateBuildSide(join->children[1].get())) {
+			return false;
+		}
+
+		BuildJoinConditions(join, column_bindings);
+
+		return true;
+	}
+
+	static void UpdateColumnBindings(PhysicalOperator &op, unordered_map<idx_t, idx_t> &column_bindings) {
+		switch (op.type) {
+		case PhysicalOperatorType::HASH_JOIN: {
+			auto &join = op.Cast<PhysicalHashJoin>();
+			unordered_map<idx_t, idx_t> new_column_bindings;
+
+			// Maps RHS input index to equivalent LHS input
+			unordered_map<idx_t, idx_t> equiv_cols;
+			for (auto &cond : join.conditions) {
+				if (cond.comparison != ExpressionType::COMPARE_EQUAL) {
+					continue;
+				}
+
+				// TODO: can LIP work on arbitrary/other expressions?
+				if (cond.left->GetExpressionClass() != ExpressionClass::BOUND_REF &&
+					cond.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
+					continue;
+				}
+
+				idx_t left_idx = cond.left->Cast<BoundReferenceExpression>().index;
+				idx_t right_idx = cond.right->Cast<BoundReferenceExpression>().index;
+
+				if (column_bindings.find(left_idx) == column_bindings.end()) {
+					continue;
+				}
+
+				equiv_cols.emplace(right_idx, left_idx);
+			}
+
+			// Update output order for non-join-keys
+			idx_t left_idx;
+			for (left_idx = 0; left_idx < join.lhs_output_columns.col_idxs.size(); left_idx++) {
+				// position in list is the output idx, value is input idx
+				auto it = column_bindings.find(join.lhs_output_columns.col_idxs[left_idx]);
+				if (it != column_bindings.end()) {
+					new_column_bindings.emplace(left_idx, it->second);
+				}
+			}
+
+			// Update output order for join keys
+			for (idx_t right_idx = 0; right_idx < join.rhs_output_columns.col_idxs.size(); right_idx++) {
+				auto it = equiv_cols.find(join.rhs_output_columns.col_idxs[right_idx]);
+				if (it != equiv_cols.end()) {
+					new_column_bindings.emplace(left_idx + right_idx, it->second);
+				}
+			}
+
+			column_bindings = new_column_bindings;
+			break;
+		}
+		case PhysicalOperatorType::PROJECTION: {
+			auto &proj = op.Cast<PhysicalProjection>();
+			unordered_map<idx_t, idx_t> new_column_bindings;
+
+			// Update output order
+			for (idx_t out_idx = 0; out_idx < proj.select_list.size(); out_idx++) {
+				// position in list is the output idx, value is input idx
+				// TODO: other types of exprs?
+				if (proj.select_list[out_idx]->type != ExpressionType::BOUND_REF) {
+					continue;
+				}
+
+				auto &bound_ref = proj.select_list[out_idx].get()->Cast<BoundReferenceExpression>();
+				auto it = column_bindings.find(bound_ref.index);
+				if (it != column_bindings.end()) {
+					new_column_bindings.emplace(out_idx, it->second);
+				}
+			}
+
+			column_bindings = new_column_bindings;
+			break;
+		}
+		default: {
+			// TODO: assert false?
+		}
+		}
+	}
+
+	void GetInitialColumnBindings(unordered_map<idx_t, idx_t> &column_bindings) const {
+		for (idx_t i = 0; i < lip_pipeline->GetSource()->types.size(); i++) {
+			column_bindings.emplace(i, i);
+		}
+	}
+
+	bool ValidateAndBuildAllJoins() {
+		// Map index at current operator to index at source
+		unordered_map<idx_t, idx_t> column_bindings;
+		GetInitialColumnBindings(column_bindings);
+
+		// Validate that everything in the pipeline is a hash join allowing LIP
+		auto operators = lip_pipeline->GetOperators();
+		for (auto &op : operators) {
+			switch (op.get().type) {
+			case PhysicalOperatorType::HASH_JOIN: {
+				if (!ValidateAndBuildJoin(&op.get().Cast<PhysicalHashJoin>(), column_bindings)) {
+					return false;
+				}
+				UpdateColumnBindings(op.get(), column_bindings);
+				break;
+			}
+			// These operators are fine to be in a LIP pipeline
+			case PhysicalOperatorType::PROJECTION: {
+				UpdateColumnBindings(op.get(), column_bindings);
+				break;
+			}
+			case PhysicalOperatorType::EXPLAIN:
+			case PhysicalOperatorType::EXPLAIN_ANALYZE:
+			case PhysicalOperatorType::STREAMING_LIMIT:
+			case PhysicalOperatorType::FILTER: {
+				break;
+			}
+			default: {
+				return false;
+			}
+			}
+		}
+
+		// At least one join must have a valid condition
+		if (lip_data.empty()) {
+			return false;
+		}
+
+		return true;
+	}
+};
+}
+
 namespace duckdb {
 
 PipelineTask::PipelineTask(Pipeline &pipeline_p, shared_ptr<Event> event_p)
@@ -251,139 +521,14 @@ void Pipeline::Ready() {
 
 	/* LIP *******************************************************************/
 
-	// Probe pipelines have a non-hash-join source
-	if (!source || source->type == PhysicalOperatorType::HASH_JOIN) {
-		// Hash join sources are only used for external joins, which can be
-		//  ignored for LIP
-		// TODO: verify above
+	// Check if LIP is applicable, and compile linkage info if so
+	LIPPlanInfo info(this);
+	if (!info.IsLIPSupported()) {
 		return;
 	}
 
-	// std::cout << "processing pipeline:\n" << ToString();
-
-	// TODO: on failing return, go and clear all the bloom filters
-
-	// Validate that everything in the pipeline is a hash join allowing LIP
-	for (auto &op : operators) {
-		switch (op.get().type) {
-		case PhysicalOperatorType::HASH_JOIN: {
-			// TODO: can we do LIP but ignore joins that don't support it?
-			if (!op.get().Cast<PhysicalHashJoin>().join_supports_lip) {
-				return;
-			}
-			break;
-		}
-		case PhysicalOperatorType::PROJECTION:
-		case PhysicalOperatorType::EXPLAIN:
-		case PhysicalOperatorType::EXPLAIN_ANALYZE:
-		case PhysicalOperatorType::STREAMING_LIMIT:
-		case PhysicalOperatorType::FILTER: {
-			break;
-		}
-		default: {
-			// TODO: are other operators ok as well?
-			return;
-		}
-		}
-	}
-
-	// We should run LIP
-	pipeline_supports_lip = true;
-
-	// Map "index at join to probe" -> "real index at source"
-	unordered_map<idx_t, idx_t> bf_probe_idxs;
-	for (idx_t i = 0; i < source->types.size(); i++) {
-		// std::cout << source->types[i].ToString() << ", ";
-		bf_probe_idxs.emplace(i, i);
-	}
-	// std::cout << '\n';
-
-	// Notify all joins that LIP should be run, and create BF pointers
-	for (auto &op : operators) {
-		// std::cout << '{';
-		// for (auto &map : bf_probe_idxs) {
-		// 	std::cout << map.first << " -> " << map.second << ", ";
-		// }
-		// std::cout << "}\n";
-
-		switch (op.get().type) {
-		// TODO: what other operators modify the output order?
-		case PhysicalOperatorType::PROJECTION: {
-			auto &proj = op.get().Cast<PhysicalProjection>();
-			unordered_map<idx_t, idx_t> new_bf_probe_idxs;
-
-			// Update output order
-			for (idx_t out_idx = 0; out_idx < proj.select_list.size(); out_idx++) {
-				// position in list is the output idx, value is input idx
-				// TODO: other types of exprs?
-				if (proj.select_list[out_idx]->type != ExpressionType::BOUND_REF) {
-					continue;
-				}
-
-				auto &bound_ref = proj.select_list[out_idx].get()->Cast<BoundReferenceExpression>();
-				auto it = bf_probe_idxs.find(bound_ref.index);
-				if (it != bf_probe_idxs.end()) {
-					new_bf_probe_idxs.emplace(out_idx, it->second);
-				}
-			}
-
-			// TODO: need to clear bf_probe_idxs?
-			bf_probe_idxs = new_bf_probe_idxs;
-			break;
-		}
-		case PhysicalOperatorType::HASH_JOIN: {
-			auto &join = op.get().Cast<PhysicalHashJoin>();
-			unordered_map<idx_t, idx_t> new_bf_probe_idxs;
-			D_ASSERT(join.join_supports_lip);
-			D_ASSERT(join.bf_build.empty());
-			join.pipeline_supports_lip = true;
-
-			// Map RHS idxs to equivalent LHS idxs
-			// TODO: what if multiple join conditions have the same RHS col?
-			unordered_map<idx_t, idx_t> equiv_cols;
-
-			// Make bloom filters for all valid probe indices
-			for (auto &info : join.bf_probe_build) {
-				auto it = bf_probe_idxs.find(info.first);
-				if (it != bf_probe_idxs.end()) {
-					auto bf = make_shared_ptr<BloomFilter>();
-
-					join.bf_build.emplace_back(info.second, bf);
-					bf_probe.emplace_back(it->second, bf);
-					equiv_cols.emplace(info.second, it->second);
-				}
-			}
-
-			// Update output order for non-join-keys
-			idx_t left_idx;
-			for (left_idx = 0; left_idx < join.lhs_output_columns.col_idxs.size(); left_idx++) {
-				// position in list is the output idx, value is input idx
-				auto it = bf_probe_idxs.find(join.lhs_output_columns.col_idxs[left_idx]);
-				if (it != bf_probe_idxs.end()) {
-					new_bf_probe_idxs.emplace(left_idx, it->second);
-				}
-			}
-
-			// Update output order for join keys
-			for (idx_t right_idx = 0; right_idx < join.rhs_output_columns.col_idxs.size(); right_idx++) {
-				auto it = equiv_cols.find(join.rhs_output_columns.col_idxs[right_idx]);
-				if (it != equiv_cols.end()) {
-					new_bf_probe_idxs.emplace(left_idx + right_idx, it->second);
-				}
-			}
-
-			bf_probe_idxs = std::move(new_bf_probe_idxs);
-			break;
-		}
-		default: {
-			break;
-		}
-		}
-	}
-
-	// for (auto &info : bf_probe) {
-	// 	std::cout << "probe idx: " << info.first << ", bf: " << info.second.get() << '\n';
-	// }
+	// Link pipeline and hash joins with shared bloom filters
+	info.LinkLIPJoins();
 }
 
 void Pipeline::AddDependency(shared_ptr<Pipeline> &pipeline) {

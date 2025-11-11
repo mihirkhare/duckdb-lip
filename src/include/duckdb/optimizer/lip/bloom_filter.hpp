@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/lip/bloom_filter/bloom_filter.hpp
+// duckdb/optimizer/lip/bf/bf.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -26,57 +26,58 @@
 
 namespace duckdb {
 
-static constexpr const uint32_t MAX_NUM_SECTORS = (1ULL << 26);
-static constexpr const uint32_t MIN_NUM_BITS_PER_KEY = 20;
-static constexpr const uint32_t MIN_NUM_BITS = 512;
-static constexpr const uint32_t LOG_SECTOR_SIZE = 5;
-static constexpr const int32_t SIMD_BATCH_SIZE = 16;
+static constexpr uint32_t MAX_NUM_SECTORS = (1ULL << 26);
+static constexpr uint32_t MIN_NUM_BITS_PER_KEY = 20;
+static constexpr uint32_t MIN_NUM_BITS = 512;
+static constexpr uint32_t LOG_SECTOR_SIZE = 5;
+static constexpr int32_t SIMD_BATCH_SIZE = 16;
 
 class BloomFilter {
 public:
 	BloomFilter() = default;
 	void Initialize(ClientContext &context_p, uint32_t est_num_rows);
 
+	int Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied, Vector &hash_staging) const;
+	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built, Vector &hash_staging);
+	void Finalize();
+
+private:
 	ClientContext *context;
 	BufferManager *buffer_manager;
-
-	bool finalized_;
-
-public:
-	int Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied) const;
-	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built);
-	void Finalize();
 
 	uint32_t num_sectors;
 	uint32_t num_sectors_log;
 
+	//! true iff all insertions have been completed
+	bool finalized;
+	//! insert atomically if not yet finalized (thread-safe)
 	std::atomic<uint32_t> *insert_blocks;
+	//! probe without cache coherence slowdowns
 	uint32_t *probe_blocks;
 
-private:
 	// key_lo |5:bit3|5:bit2|5:bit1|  13:block    |4:sector1 | bit layout (32:total)
 	// key_hi |5:bit4|5:bit3|5:bit2|5:bit1|9:block|3:sector2 | bit layout (32:total)
-	inline uint32_t GetMask1(uint32_t key_lo) const {
+	uint32_t GetMask1(uint32_t key_lo) const {
 		// 3 bits in key_lo
 		return (1u << ((key_lo >> 17) & 31)) | (1u << ((key_lo >> 22) & 31)) | (1u << ((key_lo >> 27) & 31));
 	}
-	inline uint32_t GetMask2(uint32_t key_hi) const {
+	uint32_t GetMask2(uint32_t key_hi) const {
 		// 4 bits in key_hi
 		return (1u << ((key_hi >> 12) & 31)) | (1u << ((key_hi >> 17) & 31)) | (1u << ((key_hi >> 22) & 31)) |
 		       (1u << ((key_hi >> 27) & 31));
 	}
 
-	inline uint32_t GetSector1(uint32_t key_lo, uint32_t key_hi) const {
+	uint32_t GetSector1(uint32_t key_lo, uint32_t key_hi) const {
 		// block: 13 bits in key_lo and 9 bits in key_hi
 		// sector 1: 4 bits in key_lo
 		return ((key_lo & ((1 << 17) - 1)) + ((key_hi << 14) & (((1 << 9) - 1) << 17))) & (num_sectors - 1);
 	}
-	inline uint32_t GetSector2(uint32_t key_hi, uint32_t block1) const {
+	uint32_t GetSector2(uint32_t key_hi, uint32_t block1) const {
 		// sector 2: 3 bits in key_hi
 		return block1 ^ (8 + (key_hi & 7));
 	}
 
-	inline void InsertOne(uint32_t key_lo, uint32_t key_hi, std::atomic<uint32_t> *BF_RESTRICT bf) const {
+	void InsertOne(uint32_t key_lo, uint32_t key_hi, std::atomic<uint32_t> *BF_RESTRICT bf) const {
 		uint32_t sector1 = GetSector1(key_lo, key_hi);
 		uint32_t mask1 = GetMask1(key_lo);
 		uint32_t sector2 = GetSector2(key_hi, sector1);
@@ -86,7 +87,7 @@ private:
 		bf[sector1].fetch_or(mask1, std::memory_order_relaxed);
 		bf[sector2].fetch_or(mask2, std::memory_order_relaxed);
 	}
-	inline bool LookupOne(uint32_t key_lo, uint32_t key_hi, const uint32_t *BF_RESTRICT bf) const {
+	bool LookupOne(uint32_t key_lo, uint32_t key_hi, const uint32_t *BF_RESTRICT bf) const {
 		uint32_t sector1 = GetSector1(key_lo, key_hi);
 		uint32_t mask1 = GetMask1(key_lo);
 		uint32_t sector2 = GetSector2(key_hi, sector1);
@@ -94,7 +95,6 @@ private:
 		return ((bf[sector1] & mask1) == mask1) & ((bf[sector2] & mask2) == mask2);
 	}
 
-private:
 	int BloomFilterLookup(int num, const uint64_t *BF_RESTRICT key64, const uint32_t *BF_RESTRICT bf,
 	                      uint32_t *BF_RESTRICT out) const {
 		const uint32_t *BF_RESTRICT key = reinterpret_cast<const uint32_t * BF_RESTRICT>(key64);
@@ -124,7 +124,7 @@ private:
 		return num;
 	}
 
-	void BloomFilterInsert(int num, const uint64_t *BF_RESTRICT key64, std::atomic<uint32_t> *BF_RESTRICT bf) const {
+	void BloomFilterInsert(int num, const uint64_t *BF_RESTRICT key64, std::atomic<uint32_t> *BF_RESTRICT bf) {
 		const uint32_t *BF_RESTRICT key = reinterpret_cast<const uint32_t * BF_RESTRICT>(key64);
 		for (int i = 0; i + SIMD_BATCH_SIZE <= num; i += SIMD_BATCH_SIZE) {
 			uint32_t block1[SIMD_BATCH_SIZE], mask1[SIMD_BATCH_SIZE];
@@ -156,28 +156,32 @@ private:
 	AllocatedData buf_;
 };
 
-class BloomFilterUsage {
+class LIPBloomFilter {
 public:
-	BloomFilterUsage(shared_ptr<BloomFilter> bloom_filter, const vector<idx_t> &applied, const vector<idx_t> &built)
-	    : bloom_filter(std::move(bloom_filter)), bound_cols_applied(applied), bound_cols_built(built) {
+	LIPBloomFilter(const vector<idx_t> &build_cols, const vector<idx_t> &probe_cols)
+	    : bf(make_uniq<BloomFilter>()), probe_cols(probe_cols), build_cols(build_cols) {
 	}
 
-	bool IsValid() const {
-		return bloom_filter->finalized_;
+	void Initialize(ClientContext &context_p, uint32_t est_num_rows) const {
+		bf->Initialize(context_p, est_num_rows);
 	}
 
-public:
-	int Lookup(DataChunk &chunk, vector<uint32_t> &results) const {
-		return bloom_filter->Lookup(chunk, results, bound_cols_applied);
+	void Finalize() const {
+		bf->Finalize();
 	}
-	void Insert(DataChunk &chunk) const {
-		return bloom_filter->Insert(chunk, bound_cols_applied);
+
+	int Lookup(DataChunk &chunk, vector<uint32_t> &results, Vector &hash_staging) const {
+		return bf->Lookup(chunk, results, probe_cols, hash_staging);
+	}
+
+	void Insert(DataChunk &chunk, Vector &hash_staging) const {
+		return bf->Insert(chunk, build_cols, hash_staging);
 	}
 
 private:
-	shared_ptr<BloomFilter> bloom_filter;
-	vector<idx_t> bound_cols_applied;
-	vector<idx_t> bound_cols_built;
+	unique_ptr<BloomFilter> bf;
+	vector<idx_t> probe_cols;
+	vector<idx_t> build_cols;
 };
 
 } // namespace duckdb

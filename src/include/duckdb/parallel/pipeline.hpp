@@ -85,10 +85,10 @@ public:
 
 	/* LIP *******************************************************************/
 
-	//! Whether or not the pipeline supports LIP
-	bool pipeline_supports_lip = false;
+	// //! Whether or not the pipeline supports LIP
+	// bool pipeline_supports_lip = false;
 	//! The initial (probe, BF) pairs for this pipeline, if any
-	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_probe;
+	vector<shared_ptr<LIPBloomFilter>> lip_filters;
 
 public:
 	ClientContext &GetClientContext();

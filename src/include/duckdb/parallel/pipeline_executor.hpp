@@ -54,6 +54,103 @@ private:
 	idx_t maximum_to_process;
 };
 
+class LIPProbeInfo {
+public:
+	LIPProbeInfo() = delete;
+
+	explicit LIPProbeInfo(const vector<shared_ptr<LIPBloomFilter>>& lip_filters) :
+		lip_filters(lip_filters), probe_order(lip_filters.size()), bf_miss_counts(lip_filters.size()),
+		bf_total_counts(lip_filters.size()), bf_miss_percentages(lip_filters.size()) {
+		for (idx_t i = 0; i < lip_filters.size(); i++) {
+			probe_order[i] = i;
+		}
+	}
+
+	//! Reference to filters being probed
+	const vector<shared_ptr<LIPBloomFilter>>& lip_filters;
+	//! Order in which to probe lip_filters
+	vector<idx_t> probe_order;
+	//! Current chunks processed in batch
+	size_t chunks_processed = 0;
+	//! Total chunks in batch
+	size_t batch_size = 1;
+	//! Miss count of each BF
+	vector<size_t> bf_miss_counts;
+	//! Total counts of each BF
+	vector<size_t> bf_total_counts;
+	//! Percentage of each BF
+	vector<pair<double, idx_t>> bf_miss_percentages;
+
+	//! staging area for hashes
+	Vector hash_staging = Vector(LogicalType::HASH);
+	//! results vector for probes (no need to clear between probes)
+	vector<uint32_t> probe_res = vector<uint32_t>(STANDARD_VECTOR_SIZE);
+	//! sel vector for probe results (no need to clear between probes)
+	SelectionVector probe_sel = SelectionVector(STANDARD_VECTOR_SIZE);
+
+	//! Probe BFs in current order
+	void ProbeBFs(DataChunk &chunk) {
+		for (size_t idx = 0; idx < probe_order.size(); idx++) {
+			auto &filter = lip_filters[probe_order[idx]];
+			// TODO: there has to be a better way to do this lmao
+			//  e.g. Lookup can just return a new chunk ? or at least a sel vector
+			filter->Lookup(chunk, probe_res, hash_staging);
+
+			idx_t result_count = 0;
+			for (idx_t i = 0; i < chunk.size(); i++) {
+				probe_sel.set_index(result_count, i);
+				result_count += probe_res[i];
+				// if (probe_results[i] > 0) {
+				// 	sel.set_index(result_count, i);
+				// 	result_count++;
+				// }
+			}
+			bf_miss_counts[idx] += chunk.size() - result_count;
+			bf_total_counts[idx] += chunk.size();
+
+			if (result_count != chunk.size()) {
+				chunk.Slice(probe_sel, result_count);
+			}
+		}
+
+		chunks_processed++;
+		if (chunks_processed == batch_size) {
+			ReorderProbes();
+
+			// Reset state for next batch
+			chunks_processed = 0;
+			batch_size *= 2;
+			for (size_t i = 0; i < bf_miss_counts.size(); i++) {
+				bf_miss_counts[i] = 0;
+			}
+			for (size_t i = 0; i < bf_total_counts.size(); i++) {
+				bf_total_counts[i] = 0;
+			}
+		}
+	}
+
+	//! On batch completion, reorder BFs
+	void ReorderProbes() {
+		D_ASSERT(chunks_processed == batch_size);
+
+		for (size_t i = 0; i < bf_miss_counts.size(); i++) {
+			size_t bf_miss_count = bf_miss_counts[i];
+			size_t bf_total_count = bf_total_counts[i];
+			if (bf_total_count == 0) {
+				bf_miss_percentages.emplace_back(0.0, probe_order[i]);
+				continue;
+			}
+			double bf_miss_percentage = static_cast<double>(bf_miss_count) / static_cast<double>(bf_total_count);
+			bf_miss_percentages.emplace_back(bf_miss_percentage, probe_order[i]);
+		}
+
+		std::sort(bf_miss_percentages.begin(), bf_miss_percentages.end());
+		for (idx_t i = 0; i < bf_miss_percentages.size(); i++) {
+			probe_order[i] = bf_miss_percentages[i].second;
+		}
+	}
+};
+
 //! The Pipeline class represents an execution pipeline
 class PipelineExecutor {
 public:
@@ -133,20 +230,8 @@ private:
 
 	/* LIP *******************************************************************/
 
-	//! The initial (probe, BF) pairs for this pipeline, if any
-	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_probe;
-	//! Current chunks processed in batch
-	size_t chunks_processed = 0;
-	//! Total chunks in batch
-	size_t batch_size = 1;
-	//! Miss count of each BF
-	vector<size_t> bf_miss_counts;
-	//! Total counts of each BF
-	vector<size_t> bf_total_counts;
-	//! Probe BF at index bf_idx and update miss/totals
-	void ProbeBF(idx_t bf_idx, DataChunk &chunk);
-	//! On batch completion, reorder BFs
-	void ReorderProbes();
+	//!
+	unique_ptr<LIPProbeInfo> lip_info;
 
 private:
 	void StartOperator(PhysicalOperator &op);

@@ -147,52 +147,6 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, 
 	// 	std::cout << a << ", ";
 	// }
 	// std::cout << '\n';
-
-	/* LIP *******************************************************************/
-
-	// Does the join type allow us to perform LIP?
-	if (join_type == JoinType::LEFT || join_type == JoinType::OUTER ||
-		join_type == JoinType::RIGHT_ANTI || join_type == JoinType::RIGHT_SEMI ||
-		join_type == JoinType::SINGLE) {
-		// ANTI, SEMI, and MARK joins were already disallowed earlier
-		return;
-	}
-
-	// Is the build side an unfiltered scan?
-	if (children[1].get().type == PhysicalOperatorType::TABLE_SCAN &&
-		!children[1].get().Cast<PhysicalTableScan>().table_filters) {
-		// Want to have some filtering on the RHS
-		return;
-	}
-
-	// Even if no bloom filters are built here, rest of the pipeline can work
-	join_supports_lip = true;
-
-	// Extract columns to build on
-	for (auto &condition : conditions) {
-		// LIP only works on equi-joins
-		if (condition.comparison != ExpressionType::COMPARE_EQUAL) {
-			continue;
-		}
-
-		// LIP currently only works on directly bound references
-		// TODO: can LIP work on arbitrary/other expressions?
-		if (condition.left->GetExpressionClass() != ExpressionClass::BOUND_REF &&
-			condition.right->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-			continue;
-		}
-		// std::cout << "working condition: " << condition.left->ToString() << ' ' << ExpressionTypeToString(condition.comparison) << ' ' << condition.right->ToString() << '\n';
-		//
-		// std::cout << "candidate probe: " << condition.left->Cast<BoundReferenceExpression>().index << '\n';
-		// std::cout << "candidate build: " << condition.right->Cast<BoundReferenceExpression>().index << '\n';
-
-		// Could reserve space for every condition, but that is an overestimate
-		bf_probe_build.emplace_back(
-			condition.left->Cast<BoundReferenceExpression>().index,
-			condition.right->Cast<BoundReferenceExpression>().index
-		);
-	}
-	// std::cout << PhysicalHashJoin::ToString();
 }
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, PhysicalOperator &left, PhysicalOperator &right,
@@ -258,19 +212,23 @@ public:
 
 		// TODO: clear physical operator?
 		// Initialize the bloom filters if we are in a LIP pipeline
-		if (op.pipeline_supports_lip) {
-			D_ASSERT(op.join_supports_lip);
-			// TODO: is std:move necessary/useful?
-			bf_build = std::move(op.bf_build);
-			// std::cout << "pipeline:\n";
-			for (auto &info : bf_build) {
-				// std::cout << " build idx: " << info.first << ", bf: " << info.second.get() << '\n';
-				// std::cout << "  build idx: " << info.first << "\n";
-				// TODO: is there a better size estimate?
-				info.second->Initialize(context, op.estimated_cardinality);
-			}
-			// std::cout << op.ToString();
+		if (op.lip_filter) {
+			lip_filter = op.lip_filter;
+			lip_filter->Initialize(context, op.estimated_cardinality);
 		}
+		// if (op.pipeline_supports_lip) {
+		// 	D_ASSERT(op.join_supports_lip);
+		// 	// TODO: is std:move necessary/useful?
+		// 	bf_build = std::move(op.bf_build);
+		// 	// std::cout << "pipeline:\n";
+		// 	for (auto &info : bf_build) {
+		// 		// std::cout << " build idx: " << info.first << ", bf: " << info.second.get() << '\n';
+		// 		// std::cout << "  build idx: " << info.first << "\n";
+		// 		// TODO: is there a better size estimate?
+		// 		info.second->Initialize(context, op.estimated_cardinality);
+		// 	}
+		// 	// std::cout << op.ToString();
+		// }
 		// else {
 		// 	std::cout << "no lip :(\n";
 		// }
@@ -319,8 +277,8 @@ public:
 
 	/* LIP *******************************************************************/
 
-	//! The final (build, BF) pairs for the join (set by pipeline)
-	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_build;
+	//! The bloom filter to build for the join (set by pipeline)
+	shared_ptr<LIPBloomFilter> lip_filter;
 };
 
 unique_ptr<JoinFilterLocalState> JoinFilterPushdownInfo::GetLocalState(JoinFilterGlobalState &gstate) const {
@@ -352,6 +310,13 @@ public:
 		if (op.filter_pushdown) {
 			local_filter_state = op.filter_pushdown->GetLocalState(*gstate.global_filter_state);
 		}
+
+		/* LIP *******************************************************************/
+
+		// Initialize the hash staging area if we are in a LIP pipeline
+		if (op.lip_filter) {
+			hash_staging = make_uniq<Vector>(LogicalType::HASH);
+		}
 	}
 
 public:
@@ -366,6 +331,11 @@ public:
 	unique_ptr<JoinHashTable> hash_table;
 
 	unique_ptr<JoinFilterLocalState> local_filter_state;
+
+	/* LIP *******************************************************************/
+
+	//! staging area for hashes
+	unique_ptr<Vector> hash_staging;
 };
 
 unique_ptr<JoinHashTable> PhysicalHashJoin::InitializeHashTable(ClientContext &context) const {
@@ -460,15 +430,10 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	// build the HT
 	lstate.hash_table->Build(lstate.append_state, lstate.join_keys, lstate.payload_chunk);
 
-	if (pipeline_supports_lip) {
-		for (auto &info : bf_build) {
-			auto build_idx = info.first;
-			auto &bf = info.second;
-
-			// TODO: there is surely a better way to do this
-			//  e.g. using join_keys, or perhaps batching all cols into 1 BF?
-			bf->Insert(chunk, {build_idx});
-		}
+	if (gstate.lip_filter) {
+		// TODO: there is surely a better way to do this
+		//  e.g. using join_keys?
+		gstate.lip_filter->Insert(chunk, *lstate.hash_staging);
 	}
 
 	return SinkResultType::NEED_MORE_INPUT;
@@ -960,10 +925,8 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	auto &sink = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &ht = *sink.hash_table;
 
-	if (pipeline_supports_lip) {
-		for (auto &info : bf_build) {
-			info.second->Finalize();
-		}
+	if (sink.lip_filter) {
+		sink.lip_filter->Finalize();
 	}
 
 	sink.temporary_memory_state->UpdateReservation(context);

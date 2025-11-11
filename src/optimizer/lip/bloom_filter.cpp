@@ -21,9 +21,11 @@ static uint32_t CeilPowerOfTwo(uint32_t n) {
 	return n + 1;
 }
 
-static Vector HashColumns(DataChunk &chunk, const vector<idx_t> &cols) {
+void HashColumns(DataChunk &chunk, const vector<idx_t> &cols, Vector &hashes) {
 	auto count = chunk.size();
-	Vector hashes(LogicalType::HASH);
+	// TODO: needed?
+	// hashes.Initialize();
+
 	VectorOperations::Hash(chunk.data[cols[0]], hashes, count);
 	for (size_t j = 1; j < cols.size(); j++) {
 		VectorOperations::CombineHash(hashes, chunk.data[cols[j]], count);
@@ -32,8 +34,6 @@ static Vector HashColumns(DataChunk &chunk, const vector<idx_t> &cols) {
 	if (hashes.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 		hashes.Flatten(count);
 	}
-
-	return hashes;
 }
 } // namespace
 
@@ -53,25 +53,24 @@ void BloomFilter::Initialize(ClientContext &context_p, uint32_t est_num_rows) {
 	std::fill_n(insert_blocks, num_sectors, 0);
 }
 
-int BloomFilter::Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied) const {
+int BloomFilter::Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied, Vector &hash_staging) const {
 	int count = static_cast<int>(chunk.size());
-	Vector hashes = HashColumns(chunk, bound_cols_applied);
-	BloomFilterLookup(count, reinterpret_cast<uint64_t *>(hashes.GetData()), probe_blocks, results.data());
+	HashColumns(chunk, bound_cols_applied, hash_staging);
+	BloomFilterLookup(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), probe_blocks, results.data());
 	return count;
 }
 
-void BloomFilter::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built) {
-	// std::cout << "building!\n";
+void BloomFilter::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built, Vector &hash_staging) {
 	int count = static_cast<int>(chunk.size());
-	Vector hashes = HashColumns(chunk, bound_cols_built);
-	BloomFilterInsert(count, reinterpret_cast<uint64_t *>(hashes.GetData()), insert_blocks);
+	HashColumns(chunk, bound_cols_built, hash_staging);
+	BloomFilterInsert(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), insert_blocks);
 }
 
 void BloomFilter::Finalize() {
-	if (finalized_) {
+	if (finalized) {
 		return;
 	}
-	finalized_ = true;
+	finalized = true;
 
 	probe_blocks = reinterpret_cast<uint32_t *>(insert_blocks);
 	insert_blocks = nullptr;

@@ -14,8 +14,7 @@
 namespace duckdb {
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
-    : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p),
-	  bf_probe(pipeline.bf_probe), bf_miss_counts(bf_probe.size()), bf_total_counts(bf_probe.size()) {
+    : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
 	// std::cout << duckdb_fmt::format("making executor {} on pipeline with sink {}\n", (void*) this, pipeline.sink ? (void*) pipeline.sink.get() : nullptr);
 	D_ASSERT(pipeline.source_state);
 	if (pipeline.sink) {
@@ -52,6 +51,12 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 		}
 	}
 	InitializeChunk(final_chunk);
+
+	/* LIP *******************************************************************/
+
+	if (!pipeline_p.lip_filters.empty()) {
+		lip_info = make_uniq<LIPProbeInfo>(pipeline_p.lip_filters);
+	}
 }
 
 bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {
@@ -529,90 +534,14 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 	return pipeline.sink->Sink(context, chunk, input);
 }
 
-void PipelineExecutor::ProbeBF(idx_t bf_idx, DataChunk &chunk) {
-	auto &info = bf_probe[bf_idx];
-	auto probe_idx = info.first;
-	auto &bf = info.second;
-
-	vector<uint32_t> probe_results(chunk.size());
-	auto sel = SelectionVector(chunk.size());
-
-	// TODO: there has to be a better way to do this lmao
-	//  e.g. Lookup can just return a new chunk ? or at least a sel vector
-	bf->Lookup(chunk, probe_results, {probe_idx});
-
-	idx_t result_count = 0;
-	for (idx_t i = 0; i < chunk.size(); i++) {
-		sel.set_index(result_count, i);
-		result_count += probe_results[i];
-		// if (probe_results[i] > 0) {
-		// 	sel.set_index(result_count, i);
-		// 	result_count++;
-		// }
-	}
-	bf_miss_counts[bf_idx] += chunk.size() - result_count;
-	bf_total_counts[bf_idx] += chunk.size();
-
-	if (result_count != chunk.size()) {
-		chunk.Slice(sel, result_count);
-	}
-}
-
-void PipelineExecutor::ReorderProbes() {
-	D_ASSERT(chunks_processed == batch_size);
-
-	vector<pair<idx_t, shared_ptr<BloomFilter>>> reordered_bf;
-	reordered_bf.reserve(bf_miss_counts.size());
-	vector<pair<double, idx_t>> bf_miss_percentages(bf_miss_counts.size());
-
-	// std::cout << "miss size: " << bf_miss_counts.size() << ", num filters: " << pipeline.bf_probe.size() << "\n";
-	for (size_t i = 0; i < bf_miss_counts.size(); i++) {
-		// std::cout << "hello\n";
-		size_t bf_miss_count = bf_miss_counts[i];
-		// std::cout << "its me\n";
-		size_t bf_total_count = bf_total_counts[i];
-		if (bf_total_count == 0) {
-			bf_miss_percentages.emplace_back(0.0, i);
-			continue;
-		}
-		double bf_miss_percentage = static_cast<double>(bf_miss_count) / static_cast<double>(bf_total_count);
-		bf_miss_percentages.emplace_back(bf_miss_percentage, i);
-	}
-
-	std::sort(bf_miss_percentages.begin(), bf_miss_percentages.end());
-	for (auto &pair : bf_miss_percentages) {
-		auto bf_idx = pair.second;
-		// std::cout << "wondering\n";
-		reordered_bf.push_back(bf_probe[bf_idx]);
-	}
-	bf_probe = reordered_bf;
-}
-
 SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	auto res = GetData(result, source_input);
 
-	if (pipeline.pipeline_supports_lip) {
-		for (size_t i = 0; i < pipeline.bf_probe.size(); i++) {
-			ProbeBF(i, result);
-		}
-
-		chunks_processed++;
-		if (chunks_processed == batch_size) {
-			ReorderProbes();
-
-			// Reset state for next batch
-			chunks_processed = 0;
-			batch_size *= 2;
-			for (size_t i = 0; i < bf_miss_counts.size(); i++) {
-				bf_miss_counts[i] = 0;
-			}
-			for (size_t i = 0; i < bf_total_counts.size(); i++) {
-				bf_total_counts[i] = 0;
-			}
-		}
+	if (lip_info) {
+		lip_info->ProbeBFs(result);
 	}
 
 	// Ensures sources only return empty results when Blocking or Finished

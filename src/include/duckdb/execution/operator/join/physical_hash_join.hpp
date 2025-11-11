@@ -68,14 +68,17 @@ public:
 
 	/* LIP *******************************************************************/
 
-	//! Does this hash join work with LIP (set in constructor)
-	bool join_supports_lip = false;
-	//! Does the join pipeline support LIP (set by pipeline)
-	bool pipeline_supports_lip = false;
-	//! The candidate (probe, build) index pairs for the join
-	vector<pair<idx_t, idx_t>> bf_probe_build;
-	//! The final (build, BF) pairs for the join
-	vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_build;
+	//! The bloom filter to build at this table, or null (set by pipeline)
+	shared_ptr<LIPBloomFilter> lip_filter;
+
+	// //! Does this hash join work with LIP (set in constructor)
+	// bool join_supports_lip = false;
+	// //! Does the join pipeline support LIP (set by pipeline)
+	// bool pipeline_supports_lip = false;
+	// //! The candidate (probe, build) index pairs for the join
+	// vector<pair<idx_t, idx_t>> bf_probe_build;
+	// //! The final (build, BF) pairs for the join
+	// vector<pair<idx_t, shared_ptr<BloomFilter>>> bf_build;
 protected:
 	// CachingOperator Interface
 	OperatorResultType ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
