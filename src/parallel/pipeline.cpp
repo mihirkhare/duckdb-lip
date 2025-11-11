@@ -50,21 +50,21 @@ public:
 	explicit LIPPlanInfo(Pipeline *lip_pipeline) : lip_pipeline(lip_pipeline) {}
 
 	bool IsLIPSupported() {
-		std::cout << "Validating pipeline:\n" << lip_pipeline->ToString();
+		// std::cout << "Validating pipeline:\n" << lip_pipeline->ToString();
 
 		// Probe pipelines have a non-hash-join source
 		if (!NonHashJoinSource()) {
 			return false;
 		}
 
-		std::cout << "- Valid source\n";
+		// std::cout << "- Valid source\n";
 
 		// All joins must support LIP
 		if (!ValidateAndBuildAllJoins()) {
 			return false;
 		}
 
-		std::cout << "- Valid joins\n";
+		// std::cout << "- Valid joins\n";
 
 		return true;
 	}
