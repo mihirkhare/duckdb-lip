@@ -59,8 +59,8 @@ public:
 	LIPProbeInfo() = delete;
 
 	explicit LIPProbeInfo(const vector<shared_ptr<LIPBloomFilter>>& lip_filters) :
-		lip_filters(lip_filters), probe_order(lip_filters.size()), bf_miss_counts(lip_filters.size()),
-		bf_total_counts(lip_filters.size()), bf_miss_percentages(lip_filters.size()) {
+		lip_filters(lip_filters), probe_order(lip_filters.size()), bf_hit_counts(lip_filters.size()),
+		bf_total_counts(lip_filters.size()), bf_hit_percentages(lip_filters.size()) {
 		for (idx_t i = 0; i < lip_filters.size(); i++) {
 			probe_order[i] = i;
 		}
@@ -74,12 +74,12 @@ public:
 	size_t chunks_processed = 0;
 	//! Total chunks in batch
 	size_t batch_size = 1;
-	//! Miss count of each BF
-	vector<size_t> bf_miss_counts;
+	//! Hit count of each BF
+	vector<size_t> bf_hit_counts;
 	//! Total counts of each BF
 	vector<size_t> bf_total_counts;
 	//! Percentage of each BF
-	vector<pair<double, idx_t>> bf_miss_percentages;
+	vector<pair<double, idx_t>> bf_hit_percentages;
 
 	//! staging area for hashes
 	Vector hash_staging = Vector(LogicalType::HASH);
@@ -105,11 +105,14 @@ public:
 				// 	result_count++;
 				// }
 			}
-			bf_miss_counts[idx] += chunk.size() - result_count;
+			bf_hit_counts[idx] += result_count;
 			bf_total_counts[idx] += chunk.size();
 
 			if (result_count != chunk.size()) {
 				chunk.Slice(probe_sel, result_count);
+			}
+			if (chunk.size() == 0) {
+				break;
 			}
 		}
 
@@ -120,8 +123,8 @@ public:
 			// Reset state for next batch
 			chunks_processed = 0;
 			batch_size *= 2;
-			for (size_t i = 0; i < bf_miss_counts.size(); i++) {
-				bf_miss_counts[i] = 0;
+			for (size_t i = 0; i < bf_hit_counts.size(); i++) {
+				bf_hit_counts[i] = 0;
 			}
 			for (size_t i = 0; i < bf_total_counts.size(); i++) {
 				bf_total_counts[i] = 0;
@@ -129,24 +132,26 @@ public:
 		}
 	}
 
-	//! On batch completion, reorder BFs
+	//! On batch completion, reorder BFs such that more selective BFs are first
 	void ReorderProbes() {
 		D_ASSERT(chunks_processed == batch_size);
 
-		for (size_t i = 0; i < bf_miss_counts.size(); i++) {
-			size_t bf_miss_count = bf_miss_counts[i];
+		for (size_t i = 0; i < bf_hit_counts.size(); i++) {
+			size_t bf_hit_count = bf_hit_counts[i];
 			size_t bf_total_count = bf_total_counts[i];
-			if (bf_total_count == 0) {
-				bf_miss_percentages[i] = {0.0, probe_order[i]};
+			// minumum threshold to avoid noisy reorders
+			if (bf_total_count <= 32 * batch_size) {
+				bf_hit_percentages[i] = {1.0, probe_order[i]};
 				continue;
 			}
-			double bf_miss_percentage = static_cast<double>(bf_miss_count) / static_cast<double>(bf_total_count);
-			bf_miss_percentages[i] = {bf_miss_percentage, probe_order[i]};
+			double bf_hit_percentage = static_cast<double>(bf_hit_count) / static_cast<double>(bf_total_count);
+			bf_hit_percentages[i] = {bf_hit_percentage, probe_order[i]};
 		}
 
-		std::sort(bf_miss_percentages.begin(), bf_miss_percentages.end());
-		for (idx_t i = 0; i < bf_miss_percentages.size(); i++) {
-			probe_order[i] = bf_miss_percentages[i].second;
+		// sort by increasing hit rate
+		std::sort(bf_hit_percentages.begin(), bf_hit_percentages.end());
+		for (idx_t i = 0; i < bf_hit_percentages.size(); i++) {
+			probe_order[i] = bf_hit_percentages[i].second;
 		}
 	}
 };

@@ -94,9 +94,8 @@ private:
 		return source && source->type != PhysicalOperatorType::HASH_JOIN;
 	}
 
-	static bool ValidateBuildSide(PhysicalOperator &build) {
-		// Want to have some filtering on the RHS
-		switch (build.type) {
+	static bool IsSelective(PhysicalOperator &op) {
+		switch (op.type) {
 		case PhysicalOperatorType::ORDER_BY:
 			break;
 		case PhysicalOperatorType::LIMIT:
@@ -121,8 +120,9 @@ private:
 			break;
 		case PhysicalOperatorType::FILTER:
 			break;
-		case PhysicalOperatorType::PROJECTION:
-			break;
+		case PhysicalOperatorType::PROJECTION: {
+			return IsSelective(op.children[0]);
+		}
 		case PhysicalOperatorType::RESERVOIR_SAMPLE:
 			break;
 		case PhysicalOperatorType::STREAMING_SAMPLE:
@@ -130,7 +130,7 @@ private:
 		case PhysicalOperatorType::STREAMING_WINDOW:
 			break;
 		case PhysicalOperatorType::TABLE_SCAN: {
-			if (!build.Cast<PhysicalTableScan>().table_filters) {
+			if (!op.Cast<PhysicalTableScan>().table_filters) {
 				return false;
 			}
 			break;
@@ -166,8 +166,6 @@ private:
 		case PhysicalOperatorType::POSITIONAL_JOIN:
 			break;
 		case PhysicalOperatorType::ASOF_JOIN:
-			break;
-		case PhysicalOperatorType::UNION:
 			break;
 		default: {
 			return false;
@@ -230,7 +228,7 @@ private:
 		}
 
 		// Is the build side valid for LIP?
-		if (!ValidateBuildSide(join->children[1].get())) {
+		if (!IsSelective(join->children[1].get())) {
 			return false;
 		}
 
