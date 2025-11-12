@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
-#include "libfsst.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
