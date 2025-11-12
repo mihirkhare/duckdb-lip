@@ -924,10 +924,10 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
                                             OperatorSinkFinalizeInput &input) const {
 	auto &sink = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &ht = *sink.hash_table;
-
-	if (sink.lip_filter) {
-		sink.lip_filter->Finalize();
-	}
+	//
+	// if (sink.lip_filter) {
+	// 	sink.lip_filter->Finalize();
+	// }
 
 	sink.temporary_memory_state->UpdateReservation(context);
 	sink.external = sink.temporary_memory_state->GetReservation() < sink.total_size;

@@ -38,8 +38,6 @@ void HashColumns(DataChunk &chunk, const vector<idx_t> &cols, Vector &hashes) {
 } // namespace
 
 void BloomFilter::Initialize(ClientContext &context_p, uint32_t est_num_rows) {
-	static_assert(sizeof(uint32_t) == sizeof(std::atomic<uint32_t>), "atomic<uint32_t> must be same size as uint32_t");
-
 	context = &context_p;
 	buffer_manager = &BufferManager::GetBufferManager(*context);
 
@@ -47,33 +45,33 @@ void BloomFilter::Initialize(ClientContext &context_p, uint32_t est_num_rows) {
 	num_sectors = std::min(CeilPowerOfTwo(min_bits) >> LOG_SECTOR_SIZE, MAX_NUM_SECTORS);
 	num_sectors_log = static_cast<uint32_t>(std::log2(num_sectors));
 
-	buf_ = buffer_manager->GetBufferAllocator().Allocate(64 + num_sectors * sizeof(std::atomic<uint32_t>));
+	buf_ = buffer_manager->GetBufferAllocator().Allocate(64 + num_sectors * sizeof(uint32_t));
 	// make sure blocks is a 64-byte aligned pointer, i.e., cache-line aligned
-	insert_blocks = reinterpret_cast<std::atomic<uint32_t> *>((64ULL + reinterpret_cast<uint64_t>(buf_.get())) & ~63ULL);
-	std::fill_n(insert_blocks, num_sectors, 0);
+	blocks = reinterpret_cast<uint32_t *>((64ULL + reinterpret_cast<uint64_t>(buf_.get())) & ~63ULL);
+	std::fill_n(blocks, num_sectors, 0);
 }
 
 int BloomFilter::Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied, Vector &hash_staging) const {
 	int count = static_cast<int>(chunk.size());
 	HashColumns(chunk, bound_cols_applied, hash_staging);
-	BloomFilterLookup(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), probe_blocks, results.data());
+	BloomFilterLookup(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), blocks, results.data());
 	return count;
 }
 
 void BloomFilter::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built, Vector &hash_staging) {
 	int count = static_cast<int>(chunk.size());
 	HashColumns(chunk, bound_cols_built, hash_staging);
-	BloomFilterInsert(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), insert_blocks);
+	BloomFilterInsert(count, reinterpret_cast<uint64_t *>(hash_staging.GetData()), blocks);
 }
 
-void BloomFilter::Finalize() {
-	if (finalized) {
-		return;
-	}
-	finalized = true;
-
-	probe_blocks = reinterpret_cast<uint32_t *>(insert_blocks);
-	insert_blocks = nullptr;
-}
+// void BloomFilter::Finalize() {
+// 	// if (finalized) {
+// 	// 	return;
+// 	// }
+// 	// finalized = true;
+// 	//
+// 	// probe_blocks = reinterpret_cast<uint32_t *>(insert_blocks);
+// 	// insert_blocks = nullptr;
+// }
 
 } // namespace duckdb

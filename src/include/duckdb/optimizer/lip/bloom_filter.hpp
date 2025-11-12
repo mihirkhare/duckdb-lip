@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#include "libfsst.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
@@ -39,7 +40,7 @@ public:
 
 	int Lookup(DataChunk &chunk, vector<uint32_t> &results, const vector<idx_t> &bound_cols_applied, Vector &hash_staging) const;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built, Vector &hash_staging);
-	void Finalize();
+	// void Finalize();
 
 private:
 	ClientContext *context;
@@ -50,10 +51,11 @@ private:
 
 	//! true iff all insertions have been completed
 	bool finalized;
-	//! insert atomically if not yet finalized (thread-safe)
-	std::atomic<uint32_t> *insert_blocks;
-	//! probe without cache coherence slowdowns
-	uint32_t *probe_blocks;
+	uint32_t *blocks;
+	// //! insert atomically if not yet finalized (thread-safe)
+	// std::atomic<uint32_t> *insert_blocks;
+	// //! probe without cache coherence slowdowns
+	// uint32_t *probe_blocks;
 
 	// key_lo |5:bit3|5:bit2|5:bit1|  13:block    |4:sector1 | bit layout (32:total)
 	// key_hi |5:bit4|5:bit3|5:bit2|5:bit1|9:block|3:sector2 | bit layout (32:total)
@@ -77,15 +79,18 @@ private:
 		return block1 ^ (8 + (key_hi & 7));
 	}
 
-	void InsertOne(uint32_t key_lo, uint32_t key_hi, std::atomic<uint32_t> *BF_RESTRICT bf) const {
+	void InsertOne(uint32_t key_lo, uint32_t key_hi, uint32_t *BF_RESTRICT bf) const {
 		uint32_t sector1 = GetSector1(key_lo, key_hi);
 		uint32_t mask1 = GetMask1(key_lo);
 		uint32_t sector2 = GetSector2(key_hi, sector1);
 		uint32_t mask2 = GetMask2(key_hi);
 
 		// Perform atomic OR operation on the bf array elements using std::atomic
-		bf[sector1].fetch_or(mask1, std::memory_order_relaxed);
-		bf[sector2].fetch_or(mask2, std::memory_order_relaxed);
+		std::atomic<uint32_t>& atomic_bf1 = *reinterpret_cast<std::atomic<uint32_t>*>(&bf[sector1]);
+		std::atomic<uint32_t>& atomic_bf2 = *reinterpret_cast<std::atomic<uint32_t>*>(&bf[sector2]);
+
+		atomic_bf1.fetch_or(mask1, std::memory_order_relaxed);
+		atomic_bf2.fetch_or(mask2, std::memory_order_relaxed);
 	}
 	bool LookupOne(uint32_t key_lo, uint32_t key_hi, const uint32_t *BF_RESTRICT bf) const {
 		uint32_t sector1 = GetSector1(key_lo, key_hi);
@@ -124,7 +129,7 @@ private:
 		return num;
 	}
 
-	void BloomFilterInsert(int num, const uint64_t *BF_RESTRICT key64, std::atomic<uint32_t> *BF_RESTRICT bf) {
+	void BloomFilterInsert(int num, const uint64_t *BF_RESTRICT key64, uint32_t *BF_RESTRICT bf) {
 		const uint32_t *BF_RESTRICT key = reinterpret_cast<const uint32_t * BF_RESTRICT>(key64);
 		for (int i = 0; i + SIMD_BATCH_SIZE <= num; i += SIMD_BATCH_SIZE) {
 			uint32_t block1[SIMD_BATCH_SIZE], mask1[SIMD_BATCH_SIZE];
@@ -142,8 +147,11 @@ private:
 
 			for (int j = 0; j < SIMD_BATCH_SIZE; j++) {
 				// Atomic OR operation
-				bf[block1[j]].fetch_or(mask1[j], std::memory_order_relaxed);
-				bf[block2[j]].fetch_or(mask2[j], std::memory_order_relaxed);
+				std::atomic<uint32_t>& atomic_bf1 = *reinterpret_cast<std::atomic<uint32_t>*>(&bf[block1[j]]);
+				std::atomic<uint32_t>& atomic_bf2 = *reinterpret_cast<std::atomic<uint32_t>*>(&bf[block2[j]]);
+
+				atomic_bf1.fetch_or(mask1[j], std::memory_order_relaxed);
+				atomic_bf2.fetch_or(mask2[j], std::memory_order_relaxed);
 			}
 		}
 
@@ -166,9 +174,9 @@ public:
 		bf->Initialize(context_p, est_num_rows);
 	}
 
-	void Finalize() const {
-		bf->Finalize();
-	}
+	// void Finalize() const {
+	// 	bf->Finalize();
+	// }
 
 	int Lookup(DataChunk &chunk, vector<uint32_t> &results, Vector &hash_staging) const {
 		return bf->Lookup(chunk, results, probe_cols, hash_staging);
