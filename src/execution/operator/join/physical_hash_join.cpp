@@ -214,7 +214,8 @@ public:
 		// Initialize the bloom filters if we are in a LIP pipeline
 		if (op.lip_filter) {
 			lip_filter = op.lip_filter;
-			lip_filter->Initialize(context, op.estimated_cardinality);
+			// Based on estimated cardinality of the build input
+			lip_filter->Initialize(context, op.children[1].get().estimated_cardinality);
 		}
 		// if (op.pipeline_supports_lip) {
 		// 	D_ASSERT(op.join_supports_lip);
