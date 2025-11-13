@@ -60,7 +60,8 @@ public:
 
 	explicit LIPProbeInfo(const vector<shared_ptr<LIPBloomFilter>>& lip_filters) :
 		lip_filters(lip_filters), probe_order(lip_filters.size()), bf_hit_counts(lip_filters.size()),
-		bf_total_counts(lip_filters.size()), bf_hit_percentages(lip_filters.size()) {
+		bf_total_counts(lip_filters.size()), bf_hit_percentages(lip_filters.size()),
+		hash_staging(LogicalType::HASH), probe_res(STANDARD_VECTOR_SIZE), probe_sel(STANDARD_VECTOR_SIZE) {
 		for (idx_t i = 0; i < lip_filters.size(); i++) {
 			probe_order[i] = i;
 		}
@@ -82,15 +83,18 @@ public:
 	vector<pair<double, idx_t>> bf_hit_percentages;
 
 	//! staging area for hashes
-	Vector hash_staging = Vector(LogicalType::HASH);
+	Vector hash_staging;
 	//! results vector for probes (no need to clear between probes)
-	vector<uint32_t> probe_res = vector<uint32_t>(STANDARD_VECTOR_SIZE);
+	vector<uint32_t> probe_res;
 	//! sel vector for probe results (no need to clear between probes)
-	SelectionVector probe_sel = SelectionVector(STANDARD_VECTOR_SIZE);
+	SelectionVector probe_sel;
 
 	//! Probe BFs in current order
 	void ProbeBFs(DataChunk &chunk) {
 		for (size_t idx = 0; idx < probe_order.size(); idx++) {
+			// TODO: why is this needed???????
+			probe_sel.Initialize();
+
 			auto &filter = lip_filters[probe_order[idx]];
 			// TODO: there has to be a better way to do this lmao
 			//  e.g. Lookup can just return a new chunk ? or at least a sel vector
@@ -100,35 +104,26 @@ public:
 			for (idx_t i = 0; i < chunk.size(); i++) {
 				probe_sel.set_index(result_count, i);
 				result_count += probe_res[i];
-				// if (probe_results[i] > 0) {
-				// 	sel.set_index(result_count, i);
+				// if (probe_res[i] > 0) {
+				// 	probe_sel.set_index(result_count, i);
 				// 	result_count++;
 				// }
 			}
 			bf_hit_counts[idx] += result_count;
 			bf_total_counts[idx] += chunk.size();
 
+			if (result_count == 0) {
+				chunk.Slice(0, 0);
+				break;
+			}
 			if (result_count != chunk.size()) {
 				chunk.Slice(probe_sel, result_count);
-			}
-			if (chunk.size() == 0) {
-				break;
 			}
 		}
 
 		chunks_processed++;
 		if (chunks_processed == batch_size) {
 			ReorderProbes();
-
-			// Reset state for next batch
-			chunks_processed = 0;
-			batch_size *= 2;
-			for (size_t i = 0; i < bf_hit_counts.size(); i++) {
-				bf_hit_counts[i] = 0;
-			}
-			for (size_t i = 0; i < bf_total_counts.size(); i++) {
-				bf_total_counts[i] = 0;
-			}
 		}
 	}
 
@@ -152,6 +147,16 @@ public:
 		std::sort(bf_hit_percentages.begin(), bf_hit_percentages.end());
 		for (idx_t i = 0; i < bf_hit_percentages.size(); i++) {
 			probe_order[i] = bf_hit_percentages[i].second;
+		}
+
+		// Reset state for next batch
+		chunks_processed = 0;
+		batch_size *= 2;
+		for (size_t i = 0; i < bf_hit_counts.size(); i++) {
+			bf_hit_counts[i] = 0;
+		}
+		for (size_t i = 0; i < bf_total_counts.size(); i++) {
+			bf_total_counts[i] = 0;
 		}
 	}
 };
