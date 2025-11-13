@@ -84,6 +84,7 @@ public:
 
 private:
 	Pipeline *lip_pipeline;
+	//! vector of ((build cols, probe cols), building join)
 	vector<pair<pair<vector<idx_t>, vector<idx_t>>, PhysicalHashJoin *>> lip_data;
 
 	bool NonHashJoinSource() const {
@@ -229,7 +230,8 @@ private:
 
 		// Is the build side valid for LIP?
 		if (!IsSelective(join->children[1].get())) {
-			return false;
+			// Can still do LIP on later joins, so should return true
+			return true;
 		}
 
 		BuildJoinConditions(join, column_bindings);

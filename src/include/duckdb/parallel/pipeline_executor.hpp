@@ -91,6 +91,10 @@ public:
 
 	//! Probe BFs in current order
 	void ProbeBFs(DataChunk &chunk) {
+		if (chunk.size() == 0) {
+			return;
+		}
+
 		for (size_t idx = 0; idx < probe_order.size(); idx++) {
 			// TODO: why is this needed???????
 			probe_sel.Initialize();

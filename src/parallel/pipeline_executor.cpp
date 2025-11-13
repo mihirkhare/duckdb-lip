@@ -538,10 +538,19 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
-	auto res = GetData(result, source_input);
-
+	SourceResultType res;
 	if (lip_info) {
+		res = GetData(result, source_input);
 		lip_info->ProbeBFs(result);
+		auto count = result.size();
+		while (count == 0 && res == SourceResultType::HAVE_MORE_OUTPUT) {
+			result.Reset();
+			res = GetData(result, source_input);
+			lip_info->ProbeBFs(result);
+			count = result.size();
+		}
+	} else {
+		res = GetData(result, source_input);
 	}
 
 	// Ensures sources only return empty results when Blocking or Finished
